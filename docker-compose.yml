@@ -1,0 +1,13 @@
+version: "3.9"
+
+services:
+  apmm_retrieval:
+    build: .
+    container_name: apmm_retrieval
+    env_file:
+      - .env
+    volumes:
+      # Cases folder is mounted so outputs persist on your machine
+      - ./cases:/app/cases
+    # Override entrypoint for interactive use:
+    #   docker-compose run apmm_retrieval python src/main.py --image /app/cases/test.jpg --case-id test_001
