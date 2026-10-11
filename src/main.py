@@ -30,6 +30,7 @@ from crawler import crawl_all_sync
 from cascade import build_cascade
 from validator import validate_and_exit_on_failure
 from relevance_filter import apply_to_cascade, apply_to_cascade_with_images
+from geo_enricher import enrich_cascade
 
 console = Console()
 
@@ -179,6 +180,14 @@ def run(image_path: str, case_id: str, cases_base: str = "cases",
         progress.remove_task(t)
         console.print(f"  [dim]SHA-256:[/dim] {sha256}")
 
+        _ext = Path(image_path).suffix.lower()
+        if _ext in ('.avif', '.heic', '.tiff', '.tif', '.webp'):
+            from PIL import Image as _PIL
+            _jpg_path = str(Path(image_path).with_suffix('')) + '_converted.jpg'
+            _PIL.open(image_path).convert('RGB').save(_jpg_path, 'JPEG', quality=95)
+            log.info(f"  Auto-converted {_ext} → .jpg for API compatibility")
+            image_path = _jpg_path
+
         t = progress.add_task("Step 2 — Reverse image search...", total=None)
         hits = run_all_searches(image_path, sha256)
         progress.remove_task(t)
@@ -210,12 +219,18 @@ def run(image_path: str, case_id: str, cases_base: str = "cases",
         validate_and_exit_on_failure(record)
         progress.remove_task(t)
 
+        t = progress.add_task("Step 7 — Geographic enrichment...", total=None)
+        record = enrich_cascade(record)
+        progress.remove_task(t)
+
     save_json(record, case_dir / "cascade.json")
 
     if demo:
         print_demo_report(record, case_id, image_path, source_counts, keywords)
 
     return record
+    # Convert unsupported formats to JPEG for Vision API
+
 
 
 def main():

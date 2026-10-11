@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>APMM — Propagation Viewer</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:#0f1117;color:#e2e8f0;font-family:system-ui,sans-serif;font-size:14px;min-height:100vh}
+
+#upload{display:flex;flex-direction:column;align-items:center;justify-content:center;min-height:100vh;gap:16px}
+.drop-zone{border:2px dashed #2d3748;border-radius:12px;padding:60px 80px;text-align:center;cursor:pointer;transition:border-color .2s}
+.drop-zone:hover,.drop-zone.over{border-color:#4299e1}
+.drop-zone h2{font-size:20px;font-weight:500;margin-bottom:8px}
+.drop-zone p{color:#718096;font-size:13px;margin-bottom:20px}
+.btn{display:inline-block;padding:10px 20px;background:#4299e1;color:#fff;border-radius:8px;font-size:13px;font-weight:500;cursor:pointer;border:none}
+.btn:hover{background:#3182ce}
+
+#app{display:none;flex-direction:column;height:100vh}
+
+.header{background:#1a1f2e;border-bottom:1px solid #2d3748;padding:12px 24px;display:flex;align-items:center;gap:16px;flex-shrink:0}
+.header-title{font-size:16px;font-weight:600}
+.header-sub{font-size:11px;color:#4a5568;font-family:monospace;margin-top:2px}
+.badges{display:flex;gap:6px;flex-wrap:wrap;margin-left:auto}
+.badge{padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600;background:#1e3a5f;color:#63b3ed}
+
+.stats{background:#141824;border-bottom:1px solid #2d3748;display:flex;flex-shrink:0}
+.stat{flex:1;padding:12px 20px;text-align:center;border-right:1px solid #2d3748}
+.stat:last-child{border-right:none}
+.stat-val{font-size:22px;font-weight:700;color:#4299e1;font-family:monospace}
+.stat-lbl{font-size:11px;color:#4a5568;margin-top:2px}
+
+.tab-bar{background:#1a1f2e;border-bottom:1px solid #2d3748;display:flex;padding:0 8px;flex-shrink:0;overflow-x:auto}
+.tab{display:flex;align-items:center;gap:8px;padding:10px 16px;font-size:13px;color:#718096;cursor:pointer;border-bottom:2px solid transparent;white-space:nowrap;transition:color .15s,border-color .15s;user-select:none}
+.tab:hover{color:#a0aec0;background:rgba(255,255,255,.03)}
+.tab.active{color:#e2e8f0;border-color:#4299e1;background:rgba(66,153,225,.05)}
+.tab-dot{width:8px;height:8px;border-radius:50%;background:#4a5568;flex-shrink:0}
+.tab.active .tab-dot{background:#4299e1}
+
+.panels{flex:1;overflow:hidden;position:relative}
+.panel{position:absolute;inset:0;overflow-y:auto;padding:24px;display:none}
+.panel.active{display:block}
+
+.section-h{font-size:11px;font-weight:600;letter-spacing:.1em;color:#4a5568;text-transform:uppercase;margin-bottom:16px}
+
+#map-svg-wrap{position:relative}
+.map-tip{position:absolute;background:#1a1f2e;border:1px solid #2d3748;border-radius:6px;padding:8px 12px;font-size:12px;pointer-events:none;display:none;z-index:10;min-width:140px;line-height:1.6}
+
+.charts-grid{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.chart-card{background:#1a1f2e;border:1px solid #2d3748;border-radius:8px;padding:20px}
+.chart-card h3{font-size:13px;font-weight:500;margin-bottom:14px}
+.bar-row{display:flex;align-items:center;gap:8px;margin-bottom:8px}
+.bar-lbl{width:110px;font-size:11px;color:#718096;flex-shrink:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.bar-track{flex:1;height:6px;background:#2d3748;border-radius:3px;overflow:hidden}
+.bar-fill{height:100%;border-radius:3px}
+.bar-val{font-size:11px;color:#4a5568;font-family:monospace;width:20px;text-align:right;flex-shrink:0}
+
+.tbl{width:100%;border-collapse:collapse}
+.tbl th{text-align:left;font-size:11px;font-weight:600;letter-spacing:.06em;color:#4a5568;padding:8px 10px;border-bottom:1px solid #2d3748;text-transform:uppercase}
+.tbl td{padding:9px 10px;border-bottom:1px solid #1e2535;font-size:12px}
+.tbl tr:hover td{background:rgba(66,153,225,.04)}
+.score-pill{display:inline-block;padding:2px 7px;border-radius:10px;font-family:monospace;font-size:11px;font-weight:600}
+.s-hi{background:#14532d;color:#4ade80}
+.s-md{background:#451a03;color:#fb923c}
+.s-lo{background:#2d1515;color:#f87171}
+.domain-a{color:#63b3ed;text-decoration:none;font-family:monospace;font-size:11px}
+.domain-a:hover{text-decoration:underline}
+.map-legend{margin-top:12px;display:flex;flex-wrap:wrap;gap:10px}
+.leg-item{display:flex;align-items:center;gap:6px;font-size:12px;color:#718096}
+</style>
+</head>
+<body>
+
+<div id="upload">
+  <div class="drop-zone" id="drop-zone">
+    <h2>APMM Propagation Viewer</h2>
+    <p>Drop your cascade.json here or click to select</p>
+    <button class="btn">Choose file</button>
+    <input type="file" id="fi" accept=".json" style="display:none">
+  </div>
+</div>
+
+<div id="app">
+  <div class="header">
+    <div>
+      <div class="header-title">Image Propagation Analysis</div>
+      <div class="header-sub" id="h-sub"></div>
+    </div>
+    <div class="badges" id="h-badges"></div>
+  </div>
+  <div class="stats" id="stats"></div>
+  <div class="tab-bar" id="tab-bar">
+    <div class="tab active" data-panel="timeline"><span class="tab-dot"></span>Timeline</div>
+    <div class="tab" data-panel="map"><span class="tab-dot"></span>Geographic spread</div>
+    <div class="tab" data-panel="tree"><span class="tab-dot"></span>Cascade tree</div>
+    <div class="tab" data-panel="breakdown"><span class="tab-dot"></span>Breakdown</div>
+    <div class="tab" data-panel="items"><span class="tab-dot"></span>All items</div>
+  </div>
+  <div class="panels">
+    <div class="panel active" id="panel-timeline">
+      <p class="section-h">Publication timeline — ordered by date</p>
+      <div id="tl-wrap"></div>
+    </div>
+    <div class="panel" id="panel-map">
+      <p class="section-h">Geographic propagation — numbered by order of first appearance</p>
+      <div id="map-svg-wrap"><div class="map-tip" id="map-tip"></div></div>
+      <div class="map-legend" id="map-legend"></div>
+    </div>
+    <div class="panel" id="panel-tree">
+      <p class="section-h">Cascade propagation tree</p>
+      <div id="tree-wrap"></div>
+    </div>
+    <div class="panel" id="panel-breakdown">
+      <div class="charts-grid" id="charts-grid"></div>
+    </div>
+    <div class="panel" id="panel-items">
+      <table class="tbl">
+        <thead><tr>
+          <th>ID</th><th>Domain</th><th>Country</th><th>Platform</th>
+          <th>Score</th><th>Image</th><th>Date</th>
+        </tr></thead>
+        <tbody id="items-body"></tbody>
+      </table>
+    </div>
+  </div>
+</div>
+
+<script>
+let DATA=null, ITEMS=[];
+const PC={google_lens:'#4285f4',twitter:'#1da1f2',x:'#1da1f2',facebook:'#1877f2',
+  instagram:'#e1306c',youtube:'#ff0000',reddit:'#ff4500',yandex:'#fc3f1d',
+  zenserp:'#06b6d4',default:'#64748b'};
+const pc = p => PC[p]||PC.default;
+
+document.getElementById('fi').addEventListener('change',e=>load(e.target.files[0]));
+const dz=document.getElementById('drop-zone');
+dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('over')});
+dz.addEventListener('dragleave',()=>dz.classList.remove('over'));
+dz.addEventListener('drop',e=>{e.preventDefault();dz.classList.remove('over');load(e.dataTransfer.files[0])});
+dz.addEventListener('click',()=>document.getElementById('fi').click());
+
+function load(file){
+  if(!file)return;
+  const r=new FileReader();
+  r.onload=ev=>{try{DATA=JSON.parse(ev.target.result);init()}catch(e){alert('Invalid JSON')}};
+  r.readAsText(file);
+}
+
+function init(){
+  ITEMS=(DATA.items||[]).filter(i=>i.url);
+  document.getElementById('upload').style.display='none';
+  document.getElementById('app').style.display='flex';
+  document.querySelectorAll('.tab').forEach(t=>{
+    t.addEventListener('click',()=>{
+      document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));
+      document.querySelectorAll('.panel').forEach(x=>x.classList.remove('active'));
+      t.classList.add('active');
+      document.getElementById('panel-'+t.dataset.panel).classList.add('active');
+    });
+  });
+  buildHeader();buildStats();buildTimeline();buildMap();buildTree();buildBreakdown();buildItems();
+}
+
+function buildHeader(){
+  const root=DATA.root_id||'';
+  document.getElementById('h-sub').textContent=root.slice(0,56)+'...';
+  const fs=DATA.filter_summary||{};
+  document.getElementById('h-badges').innerHTML=(fs.keywords||[])
+    .map(k=>`<span class="badge">${k}</span>`).join('');
+}
+
+function buildStats(){
+  const rel=ITEMS.filter(i=>i.relevant!==false);
+  const img=ITEMS.filter(i=>i.image_match);
+  const ctries=new Set(ITEMS.filter(i=>i.country_code).map(i=>i.country_code)).size;
+  [{v:ITEMS.length,l:'Instances found'},{v:rel.length,l:'Relevant'},
+   {v:img.length,l:'Image confirmed'},{v:ctries,l:'Countries reached'},
+   {v:(DATA.edges||[]).length,l:'Propagation edges'}]
+  .forEach(s=>{
+    document.getElementById('stats').innerHTML+=
+      `<div class="stat"><div class="stat-val">${s.v}</div><div class="stat-lbl">${s.l}</div></div>`;
+  });
+}
+
+function buildTimeline(){
+  const wrap=document.getElementById('tl-wrap');
+  const items=ITEMS.filter(i=>i.relevant!==false&&i.timestamp)
+    .sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp));
+  if(!items.length){wrap.innerHTML='<p style="color:#4a5568;padding:40px 0">No timestamped relevant items.</p>';return}
+  const W=Math.max(900,items.length*150+100),H=260,PAD=70,midY=H/2;
+  const times=items.map(i=>new Date(i.timestamp).getTime()).filter(t=>!isNaN(t));
+  const minT=Math.min(...times),maxT=Math.max(...times),span=maxT-minT||1;
+  const xOf=item=>PAD+((new Date(item.timestamp).getTime()-minT)/span)*(W-PAD*2);
+  const iById={};ITEMS.forEach(i=>{iById[i.id]=i});
+  const edgeMap={};(DATA.edges||[]).forEach(([p,c])=>{edgeMap[c]=p});
+  const itemSet=new Set(items.map(i=>i.id));
+  let edges='',nodes='';
+  items.forEach((item,idx)=>{
+    const x=xOf(item),pid=edgeMap[item.id];
+    if(pid&&itemSet.has(pid)){
+      const px=xOf(iById[pid]);
+      edges+=`<path d="M${px},${midY} C${(px+x)/2},${midY-50} ${(px+x)/2},${midY-50} ${x},${midY}" fill="none" stroke="#2d3748" stroke-width="1.5" stroke-dasharray="4,3"/>`;
+    }
+    const col=pc(item.source_platform),r=item.image_match?10:7;
+    const ring=item.image_match?`<circle cx="${x}" cy="${midY}" r="${r+5}" fill="none" stroke="${col}" stroke-width="1" opacity=".35"/>`:'';
+    const date=item.timestamp.slice(0,10),dom=(item.domain||'').replace('www.','');
+    const lbl=dom.length>16?dom.slice(0,14)+'…':dom,yl=idx%2===0?midY-r-26:midY+r+26;
+    nodes+=`${ring}<circle cx="${x}" cy="${midY}" r="${r}" fill="${col}" opacity=".9" style="cursor:pointer" class="tl-node"
+data-dom="${dom}" data-date="${date}" data-score="${(item.relevance_score||0).toFixed(2)}" data-match="${item.image_match?'✓':'✗'}" data-country="${item.country_code||'?'}"/>
+<text x="${x}" y="${yl}" text-anchor="middle" fill="#4a5568" font-size="10" font-family="monospace">${lbl}</text>
+<text x="${x}" y="${yl+(idx%2===0?12:-12)}" text-anchor="middle" fill="#2d3748" font-size="9" font-family="monospace">${date}</text>`;
+  });
+  const axis=`<line x1="${PAD}" y1="${midY}" x2="${W-PAD}" y2="${midY}" stroke="#2d3748" stroke-width="1"/>
+<text x="${PAD}" y="${midY+18}" fill="#4a5568" font-size="10" font-family="monospace">${items[0].timestamp.slice(0,10)}</text>
+<text x="${W-PAD}" y="${midY+18}" text-anchor="end" fill="#4a5568" font-size="10" font-family="monospace">${items[items.length-1].timestamp.slice(0,10)}</text>`;
+  wrap.innerHTML=`<div style="overflow-x:auto"><svg width="${W}" height="${H}" id="tl-svg" style="display:block">${axis}${edges}${nodes}</svg></div>`;
+  const tip=document.createElement('div');
+  tip.style.cssText='position:fixed;background:#1a1f2e;border:1px solid #2d3748;border-radius:6px;padding:8px 12px;font-size:12px;pointer-events:none;display:none;z-index:99;line-height:1.6';
+  document.body.appendChild(tip);
+  document.querySelectorAll('.tl-node').forEach(n=>{
+    n.addEventListener('mouseenter',e=>{
+      const d=e.target.dataset;
+      tip.innerHTML=`<strong>${d.dom}</strong><br>Date: ${d.date}<br>Score: ${d.score}<br>Country: ${d.country}<br>Image: ${d.match}`;
+      tip.style.display='block';
+    });
+    n.addEventListener('mousemove',e=>{tip.style.left=(e.clientX+12)+'px';tip.style.top=(e.clientY-10)+'px'});
+    n.addEventListener('mouseleave',()=>tip.style.display='none');
+  });
+}
+
+function buildMap(){
+  const wrap=document.getElementById('map-svg-wrap');
+  const tip=document.getElementById('map-tip');
+  const byCtry={};
+  ITEMS.filter(i=>i.relevant!==false&&i.lat&&i.lon).forEach(i=>{
+    const c=i.country_code||'XX';
+    if(!byCtry[c])byCtry[c]={country:i.country||c,code:c,lat:i.lat,lon:i.lon,count:0,hasMatch:false,earliest:null};
+    byCtry[c].count++;
+    if(i.image_match)byCtry[c].hasMatch=true;
+    const t=i.timestamp?new Date(i.timestamp):null;
+    if(t&&(!byCtry[c].earliest||t<byCtry[c].earliest))byCtry[c].earliest=t;
+  });
+  const groups=Object.values(byCtry).sort((a,b)=>{if(!a.earliest)return 1;if(!b.earliest)return -1;return a.earliest-b.earliest});
+  if(!groups.length){wrap.innerHTML='<p style="color:#4a5568;padding:40px 0">No geographic data available.</p>';return}
+  const W=960,H=480,proj=(lat,lon)=>[(lon+180)*(W/360),(90-lat)*(H/180)];
+  const maxCnt=Math.max(...groups.map(g=>g.count));
+  const pos=groups.map(g=>{const[x,y]=proj(g.lat,g.lon);return{...g,x,y}});
+  let arrows='',bubbles='',labels='';
+  for(let i=1;i<pos.length;i++){
+    const a=pos[i-1],b=pos[i],mx=(a.x+b.x)/2,my=(a.y+b.y)/2-20;
+    arrows+=`<path d="M${a.x},${a.y} Q${mx},${my} ${b.x},${b.y}" fill="none" stroke="#4299e1" stroke-width="1.2" stroke-dasharray="5,4" marker-end="url(#arr)" opacity=".45"/>`;
+  }
+  pos.forEach((g,i)=>{
+    const r=8+(g.count/maxCnt)*22,col=g.hasMatch?'#48bb78':'#4299e1';
+    const early=g.earliest?g.earliest.toISOString().slice(0,10):'?';
+    bubbles+=`<circle cx="${g.x}" cy="${g.y}" r="${r}" fill="${col}" opacity=".2" class="mbub" data-c="${g.country}" data-n="${g.count}" data-e="${early}" data-m="${g.hasMatch}"/>
+<circle cx="${g.x}" cy="${g.y}" r="${r*.5}" fill="${col}" opacity=".7" class="mbub" data-c="${g.country}" data-n="${g.count}" data-e="${early}" data-m="${g.hasMatch}"/>
+<text x="${g.x}" y="${g.y+1}" text-anchor="middle" dominant-baseline="middle" fill="#fff" font-size="9" font-weight="700" pointer-events="none">${i+1}</text>`;
+    labels+=`<text x="${g.x}" y="${g.y+r+11}" text-anchor="middle" fill="#4a5568" font-size="9" pointer-events="none">${g.code}</text>`;
+  });
+  const land='#1e2a3a',ocean='#0d1520';
+  wrap.insertAdjacentHTML('afterbegin',`<svg viewBox="0 0 ${W} ${H}" style="width:100%;background:${ocean};border-radius:8px;border:1px solid #2d3748;display:block">
+<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="#4299e1" opacity=".6"/></marker></defs>
+<path d="M120,60L200,55L230,80L250,130L230,180L200,200L160,220L130,200L110,160L100,120Z" fill="${land}" stroke="#243048" stroke-width=".5"/>
+<path d="M190,230L230,220L260,260L270,320L250,370L220,380L190,350L180,290Z" fill="${land}" stroke="#243048" stroke-width=".5"/>
+<path d="M420,60L480,55L500,80L490,110L460,120L430,110L415,85Z" fill="${land}" stroke="#243048" stroke-width=".5"/>
+<path d="M430,130L490,120L520,150L530,220L510,290L480,320L440,310L420,260L415,190Z" fill="${land}" stroke="#243048" stroke-width=".5"/>
+<path d="M500,50L700,40L760,70L780,120L750,160L700,170L640,150L580,140L530,120L505,90Z" fill="${land}" stroke="#243048" stroke-width=".5"/>
+<path d="M580,170L650,160L700,180L720,220L700,250L660,260L620,240L590,210Z" fill="${land}" stroke="#243048" stroke-width=".5"/>
+<path d="M720,280L800,270L840,300L845,350L810,380L760,375L730,345L715,310Z" fill="${land}" stroke="#243048" stroke-width=".5"/>
+<path d="M490,30L750,20L780,50L750,70L700,60L580,65L510,60Z" fill="${land}" stroke="#243048" stroke-width=".5"/>
+<line x1="0" y1="${H/2}" x2="${W}" y2="${H/2}" stroke="#1e2d45" stroke-width=".5" stroke-dasharray="4,8"/>
+<line x1="${W/2}" y1="0" x2="${W/2}" y2="${H}" stroke="#1e2d45" stroke-width=".5" stroke-dasharray="4,8"/>
+${arrows}${bubbles}${labels}</svg>`);
+  document.querySelectorAll('.mbub').forEach(el=>{
+    el.style.cursor='pointer';
+    el.addEventListener('mouseenter',e=>{
+      const d=e.target.dataset;
+      tip.innerHTML=`<strong>${d.c}</strong><br>Instances: ${d.n}<br>First seen: ${d.e}<br>Image confirmed: ${d.m==='true'?'✓':'✗'}`;
+      tip.style.display='block';
+    });
+    el.addEventListener('mousemove',e=>{
+      const rect=wrap.getBoundingClientRect();
+      tip.style.left=(e.clientX-rect.left+12)+'px';tip.style.top=(e.clientY-rect.top-10)+'px';
+    });
+    el.addEventListener('mouseleave',()=>tip.style.display='none');
+  });
+  document.getElementById('map-legend').innerHTML=pos.map((g,i)=>`
+<div class="leg-item"><span style="color:#4299e1;font-family:monospace;font-weight:700;min-width:18px">${i+1}.</span>
+<span>${g.country}</span>
+<span style="color:#4a5568">(${g.count} instance${g.count>1?'s':''}${g.earliest?' · '+g.earliest.toISOString().slice(0,10):''})</span>
+${g.hasMatch?'<span style="color:#48bb78">✓ image confirmed</span>':''}</div>`).join('');
+}
+
+function buildTree(){
+  const wrap=document.getElementById('tree-wrap');
+  const edges=DATA.edges||[];
+  const iById={};ITEMS.forEach(i=>{iById[i.id]=i});
+  const rootId=DATA.root_id;
+  const children={[rootId]:[]};
+  ITEMS.forEach(i=>{if(i.id!==rootId)children[i.id]=[]});
+  edges.forEach(([p,c])=>{if(!children[p])children[p]=[];children[p].push(c)});
+  const lCounts={},layout={};
+  const queue=[{id:rootId,depth:0}];
+  while(queue.length){
+    const{id,depth}=queue.shift();
+    if(!lCounts[depth])lCounts[depth]=0;
+    layout[id]={depth,pos:lCounts[depth]++};
+    (children[id]||[]).forEach(c=>queue.push({id:c,depth:depth+1}));
+  }
+  const maxD=Math.max(...Object.values(layout).map(n=>n.depth));
+  const W=Math.max(900,Math.max(...Object.values(lCounts))*180+100);
+  const H=(maxD+1)*90+80,NW=155,NH=44,GX=175,GY=90;
+  Object.keys(lCounts).forEach(depth=>{
+    const cnt=lCounts[depth],totalW=cnt*GX,offX=(W-totalW)/2;
+    let pos=0;
+    Object.keys(layout).forEach(id=>{
+      if(layout[id].depth==depth){layout[id].x=offX+pos*GX+GX/2;layout[id].y=40+depth*GY;pos++}
+    });
+  });
+  let edgesHTML='',nodesHTML='';
+  edges.forEach(([p,c])=>{
+    const pn=layout[p],cn=layout[c];
+    if(!pn||!cn)return;
+    edgesHTML+=`<line x1="${pn.x}" y1="${pn.y+NH/2}" x2="${cn.x}" y2="${cn.y-NH/2}" stroke="#2d3748" stroke-width="1.5"/>`;
+  });
+  Object.keys(layout).forEach(id=>{
+    const n=layout[id],item=iById[id],isRoot=id===rootId;
+    const col=isRoot?'#7c3aed':pc(item?.source_platform);
+    const dom=isRoot?'ROOT':(item?.domain||'?').replace('www.','');
+    const lbl=dom.length>17?dom.slice(0,15)+'…':dom;
+    const score=item?.relevance_score!==undefined?item.relevance_score.toFixed(2):'';
+    const ctry=item?.country_code||'',match=item?.image_match?'●':'';
+    nodesHTML+=`<rect x="${n.x-NW/2}" y="${n.y-NH/2}" width="${NW}" height="${NH}" rx="6" fill="#141824" stroke="${col}" stroke-width="${isRoot?2:1}"/>
+<text x="${n.x}" y="${n.y-6}" text-anchor="middle" fill="${col}" font-size="11" font-weight="${isRoot?700:500}" font-family="monospace">${lbl}</text>
+<text x="${n.x}" y="${n.y+9}" text-anchor="middle" fill="#4a5568" font-size="9" font-family="monospace">${score?'score:'+score:''}${ctry?' '+ctry:''} ${match}</text>`;
+  });
+  wrap.innerHTML=`<div style="overflow-x:auto"><svg width="${W}" height="${H}" style="display:block">${edgesHTML}${nodesHTML}</svg></div>`;
+}
+
+function buildBreakdown(){
+  const rel=ITEMS.filter(i=>i.relevant!==false);
+  const byP={},byC={},byE={'Image confirmed':0,'Text only':0,'No signal':0};
+  rel.forEach(i=>{
+    const p=i.source_platform||'unknown';byP[p]=(byP[p]||0)+1;
+    if(i.country)byC[i.country]=(byC[i.country]||0)+1;
+    if(i.image_match)byE['Image confirmed']++;
+    else if((i.relevance_score||0)>=0.5)byE['Text only']++;
+    else byE['No signal']++;
+  });
+  function chart(title,data,colorFn){
+    const max=Math.max(...Object.values(data),1);
+    return `<div class="chart-card"><h3>${title}</h3>${Object.entries(data).sort((a,b)=>b[1]-a[1]).map(([lbl,val])=>{
+      const col=colorFn?colorFn(lbl):'#4299e1';
+      return `<div class="bar-row"><div class="bar-lbl" title="${lbl}">${lbl}</div>
+<div class="bar-track"><div class="bar-fill" style="width:${(val/max*100).toFixed(0)}%;background:${col}"></div></div>
+<div class="bar-val">${val}</div></div>`;}).join('')}</div>`;
+  }
+  document.getElementById('charts-grid').innerHTML=
+    chart('By platform',byP,p=>pc(p))+
+    chart('By country',byC,null)+
+    chart('Evidence type',byE,k=>k==='Image confirmed'?'#48bb78':k==='Text only'?'#4299e1':'#4a5568');
+}
+
+function buildItems(){
+  document.getElementById('items-body').innerHTML=
+    [...ITEMS].sort((a,b)=>(b.relevance_score||0)-(a.relevance_score||0)).map(item=>{
+      const s=item.relevance_score,sc=s>=0.8?'s-hi':s>=0.5?'s-md':'s-lo';
+      const dom=(item.domain||'').replace('www.','');
+      return `<tr>
+<td style="font-family:monospace;color:#4a5568;font-size:11px">${item.id}</td>
+<td><a class="domain-a" href="${item.url||'#'}" target="_blank">${dom}</a></td>
+<td style="color:#718096">${item.country||'—'}</td>
+<td style="color:${pc(item.source_platform)}">${item.source_platform||'—'}</td>
+<td><span class="score-pill ${sc}">${s!==undefined?s.toFixed(2):'—'}</span></td>
+<td style="text-align:center">${item.image_match?'<span style="color:#48bb78">✓</span>':'<span style="color:#4a5568">✗</span>'}</td>
+<td style="color:#4a5568;font-family:monospace;font-size:11px">${item.timestamp?item.timestamp.slice(0,10):'—'}</td>
+</tr>`;}).join('');
+}
+</script>
+</body>
+</html>

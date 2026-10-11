@@ -155,82 +155,150 @@ def get_combined_text(snapshot_dir: Path) -> str:
 
 # ── Relevance scoring ─────────────────────────────────────────────
 
+import math as _math
+
+# Scoring weights — must sum to 1.0
+_W_TEXT    = 0.35   # keyword hits in body text
+_W_TITLE   = 0.25   # keyword hits in page title
+_W_URL     = 0.15   # keyword hits in URL
+_W_DOMAIN  = 0.10   # known reputable domain
+_W_SIGNAL  = 0.15   # other metadata signals (publisher, matched image URL)
+
+KNOWN_DOMAINS = {
+    "reuters.com", "apnews.com", "bbc.com", "bbc.co.uk", "nbcnews.com",
+    "cnn.com", "theguardian.com", "washingtonpost.com", "nytimes.com",
+    "foxnews.com", "abc.net.au", "france24.com", "dw.com", "aljazeera.com",
+    "facebook.com", "instagram.com", "twitter.com", "x.com",
+    "youtube.com", "tiktok.com", "reddit.com",
+}
+
+def _keyword_score(text: str, keywords: list[str]) -> tuple[float, list[str]]:
+    """
+    TF-inspired keyword score.
+    Uses log(1 + count) per keyword to reduce dominance of repeated terms.
+    Normalised by number of keywords so score is always 0.0-1.0.
+    """
+    if not text or not keywords:
+        return 0.0, []
+
+    text_lower = text.lower()
+    reasons    = []
+    total      = 0.0
+
+    for kw in keywords:
+        kw_lower = kw.lower()
+        # Word boundary for short keywords to avoid false matches
+        if len(kw) <= 3:
+            count = len(re.findall(r'\b' + re.escape(kw_lower) + r'\b', text_lower))
+        else:
+            count = text_lower.count(kw_lower)
+
+        if count > 0:
+            contribution = _math.log1p(count) / _math.log1p(50)  # normalise to ~1.0 at 50 hits
+            total += contribution
+            reasons.append(f"'{kw}' x{count} (contrib={contribution:.3f})")
+
+    # Normalise by keyword count so more keywords don't inflate score
+    normalised = min(1.0, total / max(1, len(keywords)))
+    return normalised, reasons
+
+
+def _title_score(title: str, keywords: list[str]) -> tuple[float, list[str]]:
+    """Title hits are high-signal — score by fraction of keywords matched."""
+    if not title or not keywords:
+        return 0.0, []
+    title_lower = title.lower()
+    hits = [kw for kw in keywords if kw.lower() in title_lower]
+    if not hits:
+        return 0.0, []
+    score = len(hits) / len(keywords)
+    return score, [f"title matches: {hits}"]
+
+
+def _url_score(url: str, keywords: list[str]) -> tuple[float, list[str]]:
+    """URL keyword hits — binary per keyword, normalised."""
+    if not url or not keywords:
+        return 0.0, []
+    url_lower = url.lower()
+    hits = [kw for kw in keywords if kw.lower() in url_lower]
+    if not hits:
+        return 0.0, []
+    score = len(hits) / len(keywords)
+    return score, [f"URL matches: {hits}"]
+
+
+def _domain_score(domain: str) -> tuple[float, list[str]]:
+    """Binary — 1.0 if known reputable domain, 0.0 otherwise."""
+    clean = domain.replace("www.", "")
+    if any(clean.endswith(d) for d in KNOWN_DOMAINS):
+        return 1.0, [f"known domain: {clean}"]
+    return 0.0, []
+
+
+def _signal_score(item: dict, keywords: list[str]) -> tuple[float, list[str]]:
+    """Other metadata signals — publisher name, matched image URL."""
+    signals = 0
+    total   = 2  # total possible signals checked
+    reasons = []
+
+    pub = (item.get("publisher") or "").lower()
+    if pub and any(kw.lower() in pub for kw in keywords):
+        signals += 1
+        reasons.append(f"publisher match: {pub[:40]}")
+
+    img_url = (item.get("matched_image_url") or "").lower()
+    if img_url and any(kw.lower() in img_url for kw in keywords):
+        signals += 1
+        reasons.append("keyword in matched image URL")
+
+    return signals / total, reasons
+
+
 def score_relevance(
     text: str,
     keywords: list[str],
     item: dict,
 ) -> tuple[float, list[str]]:
     """
-    Score how relevant a page's text is to the given keywords.
+    Mathematically grounded relevance score.
 
-    Scoring signals:
-      - Keyword hits in page text (weighted by keyword importance)
-      - URL/domain match to keywords
-      - Page title match
-      - Metadata match (publisher, platform)
+    Final score = weighted combination of five independent signals:
+      text_score   (0-1) — TF-inspired keyword frequency in body text
+      title_score  (0-1) — fraction of keywords in page title
+      url_score    (0-1) — fraction of keywords in URL
+      domain_score (0-1) — known reputable domain binary
+      signal_score (0-1) — publisher and image URL metadata
 
-    Returns (score 0.0–1.0, list of matched reasons).
+    Weights: text=0.35, title=0.25, url=0.15, domain=0.10, signal=0.15
+
+    This produces continuous scores reflecting actual evidence strength
+    rather than snapping to fixed thresholds.
     """
-    if not text and not keywords:
-        return 0.0, []
+    all_reasons = []
 
-    text_lower  = text.lower()
-    reasons     = []
-    score       = 0.0
+    ts, tr = _keyword_score(text, keywords)
+    tis, tir = _title_score(item.get("page_title", ""), keywords)
+    us, ur = _url_score(item.get("url", ""), keywords)
+    ds, dr = _domain_score(item.get("domain", ""))
+    ss, sr = _signal_score(item, keywords)
 
-    # ── Signal 1: keyword hits in body text ───────────────────────
-    keyword_hits = 0
-    for kw in keywords:
-        kw_lower = kw.lower()
-        count = text_lower.count(kw_lower)
-        if count > 0:
-            keyword_hits += 1
-            reasons.append(f"keyword '{kw}' found {count}x in page text")
-            # Diminishing returns for repeated hits
-            score += min(0.3, 0.1 * count)
+    all_reasons += tr + tir + ur + dr + sr
 
-    # Bonus if multiple keywords hit
-    if keyword_hits >= 3:
-        score += 0.15
-        reasons.append(f"{keyword_hits} keywords matched")
-    elif keyword_hits >= 2:
-        score += 0.08
+    final = (
+        _W_TEXT   * ts  +
+        _W_TITLE  * tis +
+        _W_URL    * us  +
+        _W_DOMAIN * ds  +
+        _W_SIGNAL * ss
+    )
 
-    # ── Signal 2: keyword in URL ──────────────────────────────────
-    url = (item.get("url") or "").lower()
-    for kw in keywords:
-        if kw.lower() in url:
-            score += 0.1
-            reasons.append(f"keyword '{kw}' in URL")
-            break
+    # Add score breakdown to reasons for transparency
+    all_reasons.append(
+        f"score breakdown: text={ts:.3f} title={tis:.3f} "
+        f"url={us:.3f} domain={ds:.3f} signal={ss:.3f}"
+    )
 
-    # ── Signal 3: keyword in page title ──────────────────────────
-    title = (item.get("page_title") or "").lower()
-    for kw in keywords:
-        if kw.lower() in title:
-            score += 0.15
-            reasons.append(f"keyword '{kw}' in page title")
-            break
-
-    # ── Signal 4: keyword in publisher/domain ─────────────────────
-    domain = (item.get("domain") or "").lower()
-    for kw in keywords:
-        if kw.lower() in domain:
-            score += 0.1
-            reasons.append(f"keyword '{kw}' in domain")
-            break
-
-    # ── Signal 5: matched image URL context ───────────────────────
-    matched_img = (item.get("matched_image_url") or "").lower()
-    for kw in keywords:
-        if kw.lower() in matched_img:
-            score += 0.05
-            reasons.append(f"keyword '{kw}' in matched image URL")
-            break
-
-    # Cap at 1.0
-    score = min(1.0, score)
-    return score, reasons
+    return round(final, 4), all_reasons
 
 
 # ── Main filter function ──────────────────────────────────────────
@@ -384,11 +452,20 @@ def apply_to_cascade_with_images(
             for item in record["items"]:
                 if item.get("image_match"):
                     match_type = item.get("image_match_type", "")
-                    item["_image_boost"] = {
-                        "exact":          0.60,
-                        "near_duplicate": 0.45,
-                        "possible":       0.25,
-                    }.get(match_type, 0.0)
+                    # Distance-based image boost — continuous, not fixed
+                    # Closer distance = higher boost
+                    # MAX_DISTANCE = 20 (our possible threshold)
+                    distance   = item.get("image_match_distance", 20)
+                    match_type = item.get("image_match_type", "")
+                    if match_type == "exact":
+                        boost = 1.0 - (distance / 40)        # 0-4 → 0.90-1.0
+                    elif match_type == "near_duplicate":
+                        boost = 0.85 - (distance / 30)       # 5-12 → 0.68-0.52
+                    elif match_type == "possible":
+                        boost = 0.55 - (distance / 50)       # 13-20 → 0.29-0.15
+                    else:
+                        boost = 0.0
+                    item["_image_boost"] = round(max(0.0, min(1.0, boost)), 4)
                 else:
                     item["_image_boost"] = 0.0
         except Exception as e:
@@ -466,16 +543,16 @@ def filter_items_with_image_boost(
 
         score = min(1.0, score)
 
-        # If image confirmed match, always mark relevant regardless of text
-        if item.get("image_match") and item.get("image_match_type") in ("exact", "near_duplicate"):
+        # If image confirmed — set score to 1.0 and force relevant
+        if item.get("image_match") and item.get("image_match_type") in ("exact", "near_duplicate", "possible"):
+            score       = 1.0
             is_relevant = True
-            if "image confirmed match" not in str(reasons):
-                reasons.append("image confirmed — overrides text threshold")
+            reasons.append("image confirmed — score set to 1.0")
         else:
             is_relevant = score >= threshold
 
         item["relevant"]          = is_relevant
-        item["relevance_score"]   = round(score, 3)
+        item["relevance_score"]   = round(score, 4)
         item["relevance_reasons"] = reasons
 
         status = "RELEVANT" if is_relevant else "FILTERED"

@@ -1,45 +1,40 @@
 # src/retrieval.py
 # ─────────────────────────────────────────────────────────────────
-#  Multi-source reverse image search.
+#  Multi-source reverse image search pipeline.
 #
-#  Tier 0 — Free, no limits:
-#    4chan    — public JSON API, no key needed
-#    Yandex   — Playwright scrape, no key needed
+#  Sources (in priority order):
+#    1. Google Cloud Vision  — primary, free 1,000/month
+#    2. SerpAPI Google Lens  — secondary, 250 free/month permanent
+#    3. Twitter/X API        — pay per use ~$0.008 AUD/tweet
+#    4. Apify Instagram      — free $5 credit/month
+#    5. Apify Facebook       — free $5 credit/month
 #
-#  Tier 1 — Free trials / permanent free tiers:
-#    SerpAPI  — Google Lens, 100 free trial searches  (serpapi.com)
-#    Zenserp  — Google Image Search, 50 free/month    (zenserp.com)
+#  All sources skip silently if no key is configured in .env
 #
-#  Tier 2 — Paid / gated (skipped if no key in .env):
-#    Twitter  — $100/month minimum
-#
-#  ── Hit limits ───────────────────────────────────────────────────
-#  Adjust these to control how many results each source returns.
-#  Lower = faster run, fewer API credits used.
-#  Higher = more coverage, slower, uses more credits.
+#  ── Key limits ───────────────────────────────────────────────────
+MAX_VISION_HITS    = 50    # Google Vision pages (max 100)
+MAX_LENS_HITS      = 20    # SerpAPI Lens results
+MAX_TWITTER_HITS   = 100   # tweets per query
+MAX_APIFY_RESULTS  = 20    # Instagram + Facebook results each
+MAX_TOTAL_HITS     = 30    # hard cap across ALL sources
 
-MAX_4CHAN_BOARDS       = 0    # how many boards to scan (out of 10)
-MAX_4CHAN_THREADS      = 0    # threads to check per board
-MAX_4CHAN_HITS         = 0   # hard cap on total 4chan hits
-MAX_YANDEX_HITS        = 0   # max results from Yandex
-MAX_GOOGLE_LENS_HITS   = 20   # max results from Google Lens
-MAX_ZENSERP_HITS       = 0   # max results from Zenserp
-MAX_TOTAL_HITS         = 20   # hard cap across ALL sources combined
-
+#  ── Date filter ──────────────────────────────────────────────────
+#  Only return hits published within this many days.
+#  Set to None to disable (recommended — Vision doesn't return dates)
+FILTER_DAYS = None
 # ─────────────────────────────────────────────────────────────────
 
 import os
 import time
-import asyncio
-import requests
 import base64
+import requests
+from datetime import datetime, timezone, timedelta
 from urllib.parse import urlparse
 from utils import log
 
 
-def _hit(url: str, source: str, match_type: str = "exact",
-         title: str = None, matched_image_url: str = None,
-         extra: dict = None) -> dict:
+def _hit(url, source, match_type="exact", title=None,
+         matched_image_url=None, extra=None):
     return {
         "url":               url,
         "domain":            urlparse(url).netloc,
@@ -51,227 +46,142 @@ def _hit(url: str, source: str, match_type: str = "exact",
     }
 
 
-FOURCHAN_BOARDS = [
-    "pol", "news", "wsg", "gif", "int",
-    "his", "b", "r9k", "v", "vg",
-]
-
-def search_4chan(image_sha256: str) -> list[dict]:
-    hits  = []
-    base  = "https://a.4cdn.org"
-    boards_to_scan = FOURCHAN_BOARDS[:MAX_4CHAN_BOARDS]
-
-    for board in boards_to_scan:
-        if len(hits) >= MAX_4CHAN_HITS:
-            break
-        try:
-            r = requests.get(
-                f"{base}/{board}/threads.json",
-                timeout=10,
-                headers={"User-Agent": "apmm-research-bot/1.0"},
-            )
-            if r.status_code != 200:
-                continue
-
-            thread_ids = [
-                t["no"]
-                for page in r.json()
-                for t in page.get("threads", [])
-            ][:MAX_4CHAN_THREADS]
-
-            for tid in thread_ids:
-                if len(hits) >= MAX_4CHAN_HITS:
-                    break
-                tr = requests.get(
-                    f"{base}/{board}/thread/{tid}.json",
-                    timeout=10,
-                    headers={"User-Agent": "apmm-research-bot/1.0"},
-                )
-                if tr.status_code != 200:
-                    continue
-
-                for post in tr.json().get("posts", []):
-                    if len(hits) >= MAX_4CHAN_HITS:
-                        break
-                    if "tim" not in post or "ext" not in post:
-                        continue
-                    img_url  = f"https://i.4cdn.org/{board}/{post['tim']}{post['ext']}"
-                    page_url = f"https://boards.4chan.org/{board}/thread/{tid}#p{post['no']}"
-                    hits.append(_hit(
-                        url=page_url,
-                        source="4chan",
-                        match_type="exact",
-                        title=(post.get("sub") or post.get("com", ""))[:80],
-                        matched_image_url=img_url,
-                        extra={
-                            "board":     board,
-                            "thread_id": str(tid),
-                            "post_id":   str(post["no"]),
-                            "timestamp": str(post.get("time", "")),
-                            "post_text": post.get("com", "")[:300],
-                        },
-                    ))
-
-            time.sleep(0.5)
-
-        except Exception as e:
-            log.warning(f"  [4chan] /{board}/ error: {e}")
-
-    log.info(f"  [4chan] {len(hits)} hits (cap: {MAX_4CHAN_HITS})")
-    return hits
+def _is_image_url(url):
+    exts = ('.jpg','.jpeg','.png','.gif','.webp','.avif',
+            '.bmp','.tiff','.svg','.ico')
+    path = urlparse(url).path.lower().split('?')[0]
+    return any(path.endswith(e) for e in exts)
 
 
-async def _yandex_async(image_path: str) -> list[dict]:
-    from playwright.async_api import async_playwright
-
-    hits = []
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page(user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/124.0.0.0 Safari/537.36"
-        ))
-        try:
-            await page.goto("https://yandex.com/images/", timeout=20000)
-            await page.wait_for_timeout(2000)
-
-            camera_selectors = [
-                '[class*="camera"]',
-                '[data-type="cbir"]',
-                '.cbir-button',
-                'button[aria-label*="image"]',
-                '[class*="SearchForm-cbir"]',
-                '[class*="ImageSearch"]',
-                'button[class*="cbir"]',
-            ]
-
-            clicked = False
-            for selector in camera_selectors:
-                try:
-                    btn = page.locator(selector).first
-                    if await btn.count() > 0:
-                        await btn.click(timeout=3000)
-                        clicked = True
-                        break
-                except Exception:
-                    continue
-
-            if not clicked:
-                log.warning("  [Yandex] Could not find camera button — Yandex may have updated their UI.")
-                await browser.close()
-                return []
-
-            await page.wait_for_timeout(1500)
-
-            file_input = page.locator('input[type="file"]')
-            if await file_input.count() == 0:
-                log.warning("  [Yandex] No file input found.")
-                await browser.close()
-                return []
-
-            await file_input.set_input_files(image_path)
-            await page.wait_for_timeout(5000)
-
-            result_selectors = [
-                ".serp-item",
-                '[class*="serp-item"]',
-                '[class*="SerpItem"]',
-                '[class*="ImagesApp-SerpItem"]',
-            ]
-
-            items = []
-            for sel in result_selectors:
-                items = await page.locator(sel).all()
-                if items:
-                    break
-
-            for item in items[:MAX_YANDEX_HITS]:
-                try:
-                    link  = await item.locator("a").first.get_attribute("href")
-                    title = ""
-                    for title_sel in ['[class*="title"]', '[class*="Title"]', "h3", "h2"]:
-                        try:
-                            title = await item.locator(title_sel).first.inner_text()
-                            if title:
-                                break
-                        except Exception:
-                            continue
-                    if link and link.startswith("http"):
-                        hits.append(_hit(
-                            url=link,
-                            source="yandex",
-                            match_type="near-duplicate",
-                            title=title[:200],
-                        ))
-                except Exception:
-                    continue
-
-        except Exception as e:
-            log.warning(f"  [Yandex] Scrape error: {e}")
-        finally:
-            await browser.close()
-
-    return hits
-
-
-def search_yandex(image_path: str) -> list[dict]:
+def _within_date_filter(date_str):
+    """Return True if date is within FILTER_DAYS, or if no filter set."""
+    if not FILTER_DAYS or not date_str:
+        return True
     try:
-        hits = asyncio.run(_yandex_async(image_path))
-        log.info(f"  [Yandex] {len(hits)} hits (cap: {MAX_YANDEX_HITS})")
-        return hits
-    except Exception as e:
-        log.warning(f"  [Yandex] Failed: {e}")
-        return []
+        dt     = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        cutoff = datetime.now(timezone.utc) - timedelta(days=FILTER_DAYS)
+        return dt >= cutoff
+    except Exception:
+        return True  # if we can't parse, keep it
 
 
-def search_google_lens(image_path: str) -> list[dict]:
-    api_key = os.getenv("SERPAPI_KEY", "")
+# ── 1. Google Cloud Vision ────────────────────────────────────────
+
+def search_google_vision(image_path):
+    """
+    Primary reverse image search.
+    Returns real web pages containing the image — not raw image URLs.
+    Free for first 1,000 calls/month.
+    .env: GOOGLE_VISION_KEY
+    """
+    api_key = os.getenv("GOOGLE_VISION_KEY", "")
     if not api_key:
-        log.info("  [Google Lens] No key — skipping.")
+        log.info("  [Vision] No key — skipping.")
         return []
 
     hits = []
     try:
-        # Step 1: Upload image to imgbb to get a public URL (free, no account needed)
-        with open(image_path, "rb") as f:
-            image_b64 = base64.b64encode(f.read()).decode("utf-8")
+        # Auto-convert AVIF/HEIC to JPEG — Vision API doesn't support these
+        working_path = image_path
+        _ext = image_path.lower().rsplit(".", 1)[-1]
+        if _ext in ("avif", "heic", "tiff", "tif"):
+            from PIL import Image as _PIL
+            _jpg = image_path.rsplit(".", 1)[0] + "_vision.jpg"
+            _PIL.open(image_path).convert("RGB").save(_jpg, "JPEG", quality=95)
+            working_path = _jpg
+            log.info(f"  [Vision] Converted {_ext} → jpg")
 
-        upload = requests.post(
-            "https://api.imgbb.com/1/upload",
-            data={
-                "key": os.getenv("IMGBB_API_KEY", ""),  # free public key
-                "image": image_b64,
-            },
-            timeout=30,
-        )
+        with open(working_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
 
-        # Fallback: if imgbb fails, skip
-        if upload.status_code != 200:
-            log.warning("  [Google Lens] Image hosting failed — skipping.")
-            return []
+        ext  = working_path.lower().rsplit(".", 1)[-1]
+        mime = {"jpg":"image/jpeg","jpeg":"image/jpeg","png":"image/png",
+                "gif":"image/gif","webp":"image/webp","avif":"image/avif"
+                }.get(ext, "image/jpeg")
 
-        image_url = upload.json().get("data", {}).get("url", "")
-        if not image_url:
-            return []
-
-        # Step 2: Pass the public URL to SerpAPI
-        r = requests.get(
-            "https://serpapi.com/search",
-            params={
-                "engine":    "google_reverse_image",
-                "image_url": image_url,
-                "api_key":   api_key,
-                "hl":        "en",
-                "gl":        "us",
-            },
+        r = requests.post(
+            f"https://vision.googleapis.com/v1/images:annotate?key={api_key}",
+            json={"requests":[{
+                "image":    {"content": b64},
+                "features": [{"type":"WEB_DETECTION","maxResults": MAX_VISION_HITS}],
+            }]},
             timeout=30,
         )
         r.raise_for_status()
 
-        for match in r.json().get("image_results", [])[:MAX_GOOGLE_LENS_HITS]:
+        web = r.json().get("responses",[{}])[0].get("webDetection",{})
+
+        labels = [e.get("label","") for e in web.get("bestGuessLabels",[])]
+        if labels:
+            log.info(f"  [Vision] Best guess: {labels}")
+
+        for page in web.get("pagesWithMatchingImages", []):
+            url = page.get("url", "")
+            if not url or _is_image_url(url):
+                continue
+            full    = page.get("fullMatchingImages", [])
+            partial = page.get("partialMatchingImages", [])
+            img_url = (full or partial or [{}])[0].get("url") if (full or partial) else None
+            hits.append(_hit(
+                url=url,
+                source="google_vision",
+                match_type="exact" if full else "near-duplicate",
+                title=page.get("pageTitle", ""),
+                matched_image_url=img_url,
+            ))
+
+    except Exception as e:
+        log.warning(f"  [Vision] Error: {e}")
+
+    log.info(f"  [Vision] {len(hits)} page hits")
+    return hits[:MAX_VISION_HITS]
+
+
+# ── 2. SerpAPI Google Lens ────────────────────────────────────────
+
+def search_google_lens(image_path):
+    """
+    Secondary reverse image search.
+    250 free searches/month permanent tier.
+    .env: SERPAPI_KEY  IMGBB_API_KEY
+    """
+    api_key   = os.getenv("SERPAPI_KEY", "")
+    imgbb_key = os.getenv("IMGBB_API_KEY", "")
+
+    if not api_key:
+        log.info("  [Lens] No SerpAPI key — skipping.")
+        return []
+    if not imgbb_key:
+        log.info("  [Lens] No imgbb key — skipping.")
+        return []
+
+    hits = []
+    try:
+        with open(image_path, "rb") as f:
+            b64 = base64.b64encode(f.read()).decode("utf-8")
+
+        upload = requests.post(
+            "https://api.imgbb.com/1/upload",
+            data={"key": imgbb_key, "image": b64},
+            timeout=30,
+        )
+        upload.raise_for_status()
+        image_url = upload.json().get("data", {}).get("url", "")
+        if not image_url:
+            log.warning("  [Lens] imgbb upload failed.")
+            return []
+
+        r = requests.get(
+            "https://serpapi.com/search",
+            params={"engine":"google_lens","url":image_url,
+                    "api_key":api_key,"no_cache":"true"},
+            timeout=30,
+        )
+        r.raise_for_status()
+
+        for match in r.json().get("visual_matches", [])[:MAX_LENS_HITS]:
             url = match.get("link", "")
-            if url:
+            if url and not _is_image_url(url):
                 hits.append(_hit(
                     url=url,
                     source="google_lens",
@@ -281,54 +191,20 @@ def search_google_lens(image_path: str) -> list[dict]:
                 ))
 
     except Exception as e:
-        log.warning(f"  [Google Lens] Error: {e}")
+        log.warning(f"  [Lens] Error: {e}")
 
-    log.info(f"  [Google Lens] {len(hits)} hits (cap: {MAX_GOOGLE_LENS_HITS})")
+    log.info(f"  [Lens] {len(hits)} hits")
     return hits
 
 
-def search_zenserp(image_path: str) -> list[dict]:
-    api_key = os.getenv("ZENSERP_API_KEY", "")
-    if not api_key:
-        log.info("  [Zenserp] No key — skipping.")
-        return []
+# ── 3. Twitter / X ────────────────────────────────────────────────
 
-    hits = []
-    try:
-        filename = os.path.splitext(os.path.basename(image_path))[0]
-        query    = filename.replace("_", " ").replace("-", " ")
-
-        r = requests.get(
-            "https://app.zenserp.com/api/v2/search",
-            headers={"apikey": api_key},
-            params={
-                "q":   query,
-                "tbm": "isch",
-                "num": MAX_ZENSERP_HITS,
-            },
-            timeout=15,
-        )
-        r.raise_for_status()
-
-        for item in r.json().get("image_results", [])[:MAX_ZENSERP_HITS]:
-            url = item.get("sourceUrl") or item.get("url", "")
-            if url:
-                hits.append(_hit(
-                    url=url,
-                    source="zenserp",
-                    match_type="near-duplicate",
-                    title=item.get("title", ""),
-                    matched_image_url=item.get("imageUrl", ""),
-                ))
-
-    except Exception as e:
-        log.warning(f"  [Zenserp] Error: {e}")
-
-    log.info(f"  [Zenserp] {len(hits)} hits (cap: {MAX_ZENSERP_HITS})")
-    return hits
-
-
-def search_twitter(query_text: str = "misinformation") -> list[dict]:
+def search_twitter(query_text="misinformation"):
+    """
+    Social media propagation via X API v2.
+    Pay per use ~$0.0078 AUD per tweet read.
+    .env: TWITTER_BEARER_TOKEN
+    """
     token = os.getenv("TWITTER_BEARER_TOKEN", "")
     if not token:
         log.info("  [Twitter] No token — skipping.")
@@ -340,39 +216,52 @@ def search_twitter(query_text: str = "misinformation") -> list[dict]:
             "https://api.twitter.com/2/tweets/search/recent",
             headers={"Authorization": f"Bearer {token}"},
             params={
-                "query":        f"{query_text} has:images -is:retweet",
-                "max_results":  20,
-                "tweet.fields": "created_at,author_id",
-                "expansions":   "attachments.media_keys",
+                "query":        f"{query_text} has:images -is:retweet lang:en",
+                "max_results":  MAX_TWITTER_HITS,
+                "tweet.fields": "created_at,author_id,text",
+                "expansions":   "attachments.media_keys,author_id",
                 "media.fields": "url,preview_image_url",
+                "user.fields":  "username,location",
             },
             timeout=15,
         )
         r.raise_for_status()
-        data      = r.json()
-        media_map = {
-            m["media_key"]: m
-            for m in data.get("includes", {}).get("media", [])
-        }
+        data = r.json()
+
+        media_map = {m["media_key"]:m
+                     for m in data.get("includes",{}).get("media",[])}
+        user_map  = {u["id"]:u
+                     for u in data.get("includes",{}).get("users",[])}
+
         for tweet in data.get("data", []):
-            tweet_url  = f"https://twitter.com/i/web/status/{tweet['id']}"
-            media_keys = tweet.get("attachments", {}).get("media_keys", [])
-            img_url    = None
-            for mk in media_keys:
-                m = media_map.get(mk, {})
-                img_url = m.get("url") or m.get("preview_image_url")
-                if img_url:
-                    break
+            created = tweet.get("created_at", "")
+            if not _within_date_filter(created):
+                continue
+
+            tweet_id  = tweet["id"]
+            tweet_url = f"https://twitter.com/i/web/status/{tweet_id}"
+            keys      = tweet.get("attachments",{}).get("media_keys",[])
+            img_url   = next(
+                (media_map.get(k,{}).get("url") or
+                 media_map.get(k,{}).get("preview_image_url")
+                 for k in keys if media_map.get(k)), None
+            )
+            user = user_map.get(tweet.get("author_id",""), {})
+
             hits.append(_hit(
                 url=tweet_url,
                 source="twitter",
                 match_type="near-duplicate",
                 matched_image_url=img_url,
                 extra={
-                    "tweet_id":  tweet["id"],
-                    "timestamp": tweet.get("created_at", ""),
+                    "tweet_id":  tweet_id,
+                    "timestamp": created,
+                    "author":    user.get("username",""),
+                    "location":  user.get("location",""),
+                    "post_text": tweet.get("text","")[:300],
                 },
             ))
+
     except Exception as e:
         log.warning(f"  [Twitter] Error: {e}")
 
@@ -380,28 +269,226 @@ def search_twitter(query_text: str = "misinformation") -> list[dict]:
     return hits
 
 
-def run_all_searches(image_path: str, image_sha256: str,
-                     query_text: str = "misinformation") -> list[dict]:
-    """
-    Run quality sources only.
-    4chan removed — it has no reverse image matching capability.
-    """
-    log.info(f"Starting search (total cap: {MAX_TOTAL_HITS} hits)...")
+# ── 4 + 5. Apify (Instagram + Facebook) ──────────────────────────
 
-    seen:   set[str]   = set()
-    merged: list[dict] = []
+def _run_apify_actor(actor_id, run_input, token, is_task=False):
+    """
+    Trigger an Apify Actor or Task, wait for it to finish, return results.
+    Pass is_task=True to call a saved task instead of an actor directly.
+    """
+    endpoint = "tasks" if is_task else "acts"
+    # Apify API requires / to be replaced with ~ in actor IDs
+    encoded_id = actor_id.replace("/", "~")
+    start = requests.post(
+        f"https://api.apify.com/v2/{endpoint}/{encoded_id}/runs",
+        headers={"Authorization": f"Bearer {token}"},
+        json=run_input,
+        timeout=30,
+    )
+    start.raise_for_status()
+    run_id = start.json().get("data", {}).get("id")
+    if not run_id:
+        raise ValueError("No run ID returned from Apify")
 
-    def _add(hits: list[dict]) -> None:
+    log.info(f"  [Apify] Run {run_id} started for {actor_id}")
+
+    for attempt in range(36):
+        time.sleep(5)
+        status_r = requests.get(
+            f"https://api.apify.com/v2/actor-runs/{run_id}",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=15,
+        )
+        status_r.raise_for_status()
+        status = status_r.json().get("data", {}).get("status", "")
+        log.info(f"  [Apify] Status: {status} ({attempt*5}s)")
+        if status in ("SUCCEEDED", "FAILED", "ABORTED", "TIMED-OUT"):
+            break
+
+    if status != "SUCCEEDED":
+        raise RuntimeError(f"Apify run ended with status: {status}")
+
+    dataset_id = status_r.json().get("data", {}).get("defaultDatasetId")
+    results_r  = requests.get(
+        f"https://api.apify.com/v2/datasets/{dataset_id}/items",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"limit": MAX_APIFY_RESULTS, "format": "json"},
+        timeout=30,
+    )
+    results_r.raise_for_status()
+    return results_r.json()
+
+
+def search_apify_instagram(query_text):
+    """
+    Search Instagram public posts via Apify.
+    Uses apify/instagram-scraper — searches by hashtag.
+    Result limit controlled by MAX_APIFY_RESULTS.
+    .env: APIFY_TOKEN
+    """
+    token = os.getenv("APIFY_TOKEN", "")
+    if not token:
+        log.info("  [Instagram] No Apify token — skipping.")
+        return []
+
+    # Convert query words to hashtags — take first 3 meaningful words
+    hashtags = [
+        "#" + w.strip("#").replace(" ","").lower()
+        for w in query_text.split()[:3]
+        if len(w.strip("#")) > 2
+    ]
+    if not hashtags:
+        hashtags = ["#misinformation"]
+
+    log.info(f"  [Instagram] Searching hashtags: {hashtags}")
+
+    hits = []
+    try:
+        results = _run_apify_actor(
+            actor_id="apify/instagram-scraper",
+            run_input={
+                "directUrls": [
+                    f"https://www.instagram.com/explore/tags/{h.strip('#')}/"
+                    for h in hashtags
+                ],
+                "resultsType":  "posts",
+                "resultsLimit": MAX_APIFY_RESULTS,
+            },
+            token=token,
+            is_task=False,
+        )
+
+        for post in results:
+            shortcode = post.get("shortCode") or post.get("id","")
+            url = post.get("url","") or (
+                f"https://www.instagram.com/p/{shortcode}/" if shortcode else ""
+            )
+            if not url:
+                continue
+
+            timestamp = str(post.get("timestamp") or post.get("takenAtTs",""))
+            if not _within_date_filter(timestamp):
+                continue
+
+            hits.append(_hit(
+                url=url,
+                source="instagram",
+                match_type="near-duplicate",
+                title=(post.get("caption","") or "")[:100],
+                matched_image_url=post.get("displayUrl") or post.get("imageUrl",""),
+                extra={
+                    "timestamp": timestamp,
+                    "author":    post.get("ownerUsername",""),
+                    "location":  post.get("locationName",""),
+                    "post_text": (post.get("caption","") or "")[:300],
+                    "likes":     post.get("likesCount", 0),
+                    "comments":  post.get("commentsCount", 0),
+                },
+            ))
+
+    except Exception as e:
+        log.warning(f"  [Instagram] Apify error: {e}")
+
+    log.info(f"  [Instagram] {len(hits)} hits")
+    return hits
+
+
+def search_apify_facebook(query_text):
+    """
+    Search Facebook public posts by keyword via Apify.
+    Uses actor TMBawM4LZpKN15DZX — searches posts by keyword.
+    .env: APIFY_TOKEN
+    """
+    token = os.getenv("APIFY_TOKEN", "")
+    if not token:
+        log.info("  [Facebook] No Apify token — skipping.")
+        return []
+
+    log.info(f"  [Facebook] Searching for: {query_text}")
+
+    hits = []
+    try:
+        results = _run_apify_actor(
+            actor_id="scraper_one/facebook-posts-search",
+            run_input={
+                "searchQuery":     query_text,
+                "numberOfResults": MAX_APIFY_RESULTS,
+                "searchType":      "Most popular",
+            },
+            token=token,
+            is_task=False,
+        )
+
+        for post in results:
+            url = post.get("url","") or post.get("postUrl","")
+            if not url:
+                continue
+
+            timestamp = str(post.get("time") or post.get("timestamp",""))
+            if not _within_date_filter(timestamp):
+                continue
+
+            # Extract image URL from media if available
+            media    = post.get("media", [])
+            img_url  = ""
+            if isinstance(media, list) and media:
+                img_url = media[0].get("url","") or media[0].get("photo","")
+            elif isinstance(media, dict):
+                img_url = media.get("photo","") or media.get("url","")
+
+            hits.append(_hit(
+                url=url,
+                source="facebook",
+                match_type="near-duplicate",
+                title=(post.get("text","") or "")[:100],
+                matched_image_url=img_url,
+                extra={
+                    "timestamp": timestamp,
+                    "author":    post.get("pageName","") or post.get("authorName",""),
+                    "post_text": (post.get("text","") or "")[:300],
+                    "likes":     post.get("likes", 0),
+                    "shares":    post.get("shares", 0),
+                    "comments":  post.get("comments", 0),
+                },
+            ))
+
+    except Exception as e:
+        log.warning(f"  [Facebook] Apify error: {e}")
+
+    log.info(f"  [Facebook] {len(hits)} hits")
+    return hits
+
+
+# ── Combined runner ───────────────────────────────────────────────
+
+def run_all_searches(image_path, image_sha256, query_text="misinformation"):
+    """
+    Run all sources in priority order.
+    Sources with no key configured are silently skipped.
+    Deduplicates on URL. Hard cap at MAX_TOTAL_HITS.
+    """
+    log.info(f"Starting multi-source search (cap: {MAX_TOTAL_HITS})...")
+
+    seen, merged = set(), []
+
+    def _add(hits):
         for hit in hits:
-            url = hit.get("url", "")
+            url = hit.get("url","")
             if url and url not in seen and len(merged) < MAX_TOTAL_HITS:
                 seen.add(url)
                 merged.append(hit)
 
-    _add(search_google_lens(image_path))
-    _add(search_zenserp(image_path))
-    _add(search_twitter(query_text))
-    _add(search_yandex(image_path))
+    _add(search_google_vision(image_path))   # primary
+    _add(search_google_lens(image_path))     # secondary
+    _add(search_twitter(query_text))         # social — X
+    _add(search_apify_instagram(query_text)) # social — Instagram
+    _add(search_apify_facebook(query_text))  # social — Facebook
 
+    # Log source breakdown
+    by_source = {}
+    for h in merged:
+        s = h.get("source_platform","?")
+        by_source[s] = by_source.get(s,0) + 1
+    log.info(f"Source breakdown: {by_source}")
     log.info(f"Total unique hits: {len(merged)}")
     return merged
