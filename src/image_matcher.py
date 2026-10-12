@@ -71,7 +71,7 @@ def _compute_phash_from_file(image_path: str):
 def _hash_distance(h1, h2) -> int:
     """Hamming distance between two pHashes."""
     try:
-        return h1 - h2
+        return int(h1 - h2)   # imagehash returns numpy ints, which JSON would stringify
     except Exception:
         return 999
 

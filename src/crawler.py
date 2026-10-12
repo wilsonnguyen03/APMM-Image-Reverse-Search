@@ -131,10 +131,10 @@ def extract_date_from_text(text: str) -> str | None:
 
 # ── Crawler ───────────────────────────────────────────────────────
 
-async def crawl_url(url: str, case_dir: Path, item_id: str,
-                    timeout_ms: int = 20000) -> dict:
-    from playwright.async_api import async_playwright
+CONCURRENCY = 8   # pages crawled in parallel
 
+async def crawl_url(browser, url: str, case_dir: Path, item_id: str,
+                    timeout_ms: int = 20000) -> dict:
     snapshot_dir = make_snapshot_dir(case_dir, item_id)
     result = {
         "url":           url,
@@ -145,79 +145,93 @@ async def crawl_url(url: str, case_dir: Path, item_id: str,
         "snapshot_path": str(snapshot_dir),
     }
 
-    async with async_playwright() as p:
-        browser = await p.chromium.launch(headless=True)
-        context = await browser.new_context(
-            user_agent=(
-                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/124.0.0.0 Safari/537.36"
-            ),
-            viewport={"width": 1280, "height": 900},
-        )
+    # One isolated context per page; the browser itself is shared.
+    context = await browser.new_context(
+        user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0.0.0 Safari/537.36"
+        ),
+        viewport={"width": 1280, "height": 900},
+    )
+    try:
         page = await context.new_page()
+
+        # domcontentloaded returns quickly; networkidle is only a bounded
+        # best-effort wait so JS-rendered dates can appear without stalling
+        # on pages that never go idle.
+        await page.goto(url, timeout=timeout_ms, wait_until="domcontentloaded")
         try:
-            # Wait for networkidle so JS-rendered dates have time to appear
-            await page.goto(url, timeout=timeout_ms, wait_until="networkidle")
+            await page.wait_for_load_state("networkidle", timeout=4000)
+        except Exception:
+            pass
+        await page.wait_for_timeout(1000)
 
-            # Extra wait for dynamic content (social media especially)
-            await page.wait_for_timeout(2000)
+        await page.screenshot(
+            path=str(snapshot_dir / "screenshot.png"), full_page=True
+        )
+        html = await page.content()
+        (snapshot_dir / "page.html").write_text(
+            html, encoding="utf-8", errors="replace"
+        )
 
-            await page.screenshot(
-                path=str(snapshot_dir / "screenshot.png"), full_page=True
-            )
-            html = await page.content()
-            (snapshot_dir / "page.html").write_text(
-                html, encoding="utf-8", errors="replace"
-            )
+        result["page_title"] = await page.title() or None
+        result["publisher"]  = await page.evaluate(PUBLISHER_JS)
 
-            result["page_title"] = await page.title() or None
-            result["publisher"]  = await page.evaluate(PUBLISHER_JS)
+        timestamp = await page.evaluate(TIMESTAMP_JS)
 
-            # Fix 1: Extended JS selectors for timestamp
-            timestamp = await page.evaluate(TIMESTAMP_JS)
+        # Regex fallback on visible page text if no selector matched
+        if not timestamp:
+            page_text = await page.evaluate("""
+                () => {
+                    const body = document.body;
+                    if (!body) return '';
+                    const clone = body.cloneNode(true);
+                    clone.querySelectorAll('script,style,noscript').forEach(el => el.remove());
+                    return clone.innerText || clone.textContent || '';
+                }
+            """)
+            timestamp = extract_date_from_text(page_text)
+            if timestamp:
+                log.info(f"  Date found via regex: {timestamp}")
 
-            # Fix 2: Regex fallback on page text if JS didn't find a date
-            if not timestamp:
-                # Extract visible text from page
-                page_text = await page.evaluate("""
-                    () => {
-                        const body = document.body;
-                        if (!body) return '';
-                        // Remove scripts and styles
-                        const clone = body.cloneNode(true);
-                        clone.querySelectorAll('script,style,noscript').forEach(el => el.remove());
-                        return clone.innerText || clone.textContent || '';
-                    }
-                """)
-                timestamp = extract_date_from_text(page_text)
-                if timestamp:
-                    log.info(f"  Date found via regex: {timestamp}")
+        result["timestamp"] = timestamp
+        log.info(f"  Crawled: {result['domain']}"
+                 + (f" | date: {timestamp[:10]}" if timestamp else " | date: not found"))
 
-            result["timestamp"] = timestamp
-            log.info(f"  Crawled: {result['domain']}"
-                     + (f" | date: {timestamp[:10]}" if timestamp else " | date: not found"))
-
-        except Exception as e:
-            log.warning(f"  Failed: {url[:60]} — {e}")
-            (snapshot_dir / "error.txt").write_text(str(e), encoding="utf-8")
-        finally:
-            await browser.close()
+    except Exception as e:
+        log.warning(f"  Failed: {url[:60]} — {e}")
+        (snapshot_dir / "error.txt").write_text(str(e), encoding="utf-8")
+    finally:
+        await context.close()
 
     return result
 
 
 async def crawl_all(hits: list[dict], case_dir: Path) -> list[dict]:
-    enriched = []
-    for i, hit in enumerate(hits):
+    from playwright.async_api import async_playwright
+
+    sem = asyncio.Semaphore(CONCURRENCY)
+
+    async def one(browser, i, hit):
         item_id = f"item_{i:03d}"
-        url = hit.get("url", "")
-        if not url:
-            continue
-        log.info(f"Crawling {i+1}/{len(hits)}: {url[:80]}")
-        meta = await crawl_url(url, case_dir, item_id)
-        enriched.append({**hit, **meta, "id": item_id})
-    return enriched
+        async with sem:
+            log.info(f"Crawling {i+1}/{len(hits)}: {hit['url'][:80]}")
+            meta = await crawl_url(browser, hit["url"], case_dir, item_id)
+        # A failed crawl must not overwrite the search hit's own title/date/etc. with None
+        meta = {k: v for k, v in meta.items() if v is not None}
+        return {**hit, **meta, "id": item_id}
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            # gather preserves input order, so item ids stay stable
+            return list(await asyncio.gather(*(
+                one(browser, i, hit)
+                for i, hit in enumerate(hits) if hit.get("url")
+            )))
+        finally:
+            await browser.close()
 
 
 def crawl_all_sync(hits: list[dict], case_dir: Path) -> list[dict]:

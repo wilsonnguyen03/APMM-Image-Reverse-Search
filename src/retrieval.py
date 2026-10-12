@@ -12,11 +12,11 @@
 #  All sources skip silently if no key is configured in .env
 #
 #  ── Key limits ───────────────────────────────────────────────────
-MAX_VISION_HITS    = 50    # Google Vision pages (max 100)
+MAX_VISION_HITS    = 39    # Google Vision pages (max 100)
 MAX_LENS_HITS      = 20    # SerpAPI Lens results
-MAX_TWITTER_HITS   = 100   # tweets per query
-MAX_APIFY_RESULTS  = 20    # Instagram + Facebook results each
-MAX_TOTAL_HITS     = 30    # hard cap across ALL sources
+MAX_TWITTER_HITS   = 15  # tweets per query
+MAX_APIFY_RESULTS  = 15    # Instagram + Facebook results each
+MAX_TOTAL_HITS     = 100  # hard cap across ALL sources
 
 #  ── Date filter ──────────────────────────────────────────────────
 #  Only return hits published within this many days.
@@ -210,14 +210,13 @@ def search_twitter(query_text="misinformation"):
         log.info("  [Twitter] No token — skipping.")
         return []
 
-    hits = []
-    try:
+    def fetch(terms):
         r = requests.get(
             "https://api.twitter.com/2/tweets/search/recent",
             headers={"Authorization": f"Bearer {token}"},
             params={
-                "query":        f"{query_text} has:images -is:retweet lang:en",
-                "max_results":  MAX_TWITTER_HITS,
+                "query":        f"{terms} has:images -is:retweet",
+                "max_results":  max(10, min(MAX_TWITTER_HITS, 100)),  # API range is 10-100
                 "tweet.fields": "created_at,author_id,text",
                 "expansions":   "attachments.media_keys,author_id",
                 "media.fields": "url,preview_image_url",
@@ -226,7 +225,15 @@ def search_twitter(query_text="misinformation"):
             timeout=15,
         )
         r.raise_for_status()
-        data = r.json()
+        return r.json()
+
+    hits = []
+    try:
+        words = query_text.split()
+        # All keywords first (precise); fall back to any keyword if that finds nothing
+        data = fetch(" ".join(words))
+        if not data.get("data") and len(words) > 1:
+            data = fetch("(" + " OR ".join(words) + ")")
 
         media_map = {m["media_key"]:m
                      for m in data.get("includes",{}).get("media",[])}
@@ -396,7 +403,7 @@ def search_apify_instagram(query_text):
 def search_apify_facebook(query_text):
     """
     Search Facebook public posts by keyword via Apify.
-    Uses actor TMBawM4LZpKN15DZX — searches posts by keyword.
+    Uses actor scraper_one/facebook-posts-search (id TMBawM4LZpKN15DZX).
     .env: APIFY_TOKEN
     """
     token = os.getenv("APIFY_TOKEN", "")
@@ -411,44 +418,42 @@ def search_apify_facebook(query_text):
         results = _run_apify_actor(
             actor_id="scraper_one/facebook-posts-search",
             run_input={
-                "searchQuery":     query_text,
-                "numberOfResults": MAX_APIFY_RESULTS,
-                "searchType":      "Most popular",
+                "query":        query_text,
+                "resultsCount": MAX_APIFY_RESULTS,
+                "searchType":   "top",
             },
             token=token,
             is_task=False,
         )
 
         for post in results:
-            url = post.get("url","") or post.get("postUrl","")
+            url = post.get("url", "")
             if not url:
                 continue
 
-            timestamp = str(post.get("time") or post.get("timestamp",""))
+            # The actor returns epoch milliseconds
+            ms = post.get("timestamp")
+            timestamp = (datetime.fromtimestamp(ms / 1000, timezone.utc).isoformat()
+                         if isinstance(ms, (int, float)) else "")
             if not _within_date_filter(timestamp):
                 continue
 
-            # Extract image URL from media if available
-            media    = post.get("media", [])
-            img_url  = ""
-            if isinstance(media, list) and media:
-                img_url = media[0].get("url","") or media[0].get("photo","")
-            elif isinstance(media, dict):
-                img_url = media.get("photo","") or media.get("url","")
-
+            photo = next((a.get("url", "") for a in post.get("attachments") or []
+                          if a.get("type") == "photo"), "")
+            text = post.get("postText", "") or ""
             hits.append(_hit(
                 url=url,
                 source="facebook",
                 match_type="near-duplicate",
-                title=(post.get("text","") or "")[:100],
-                matched_image_url=img_url,
+                title=text[:100],
+                matched_image_url=photo,
                 extra={
                     "timestamp": timestamp,
-                    "author":    post.get("pageName","") or post.get("authorName",""),
-                    "post_text": (post.get("text","") or "")[:300],
-                    "likes":     post.get("likes", 0),
-                    "shares":    post.get("shares", 0),
-                    "comments":  post.get("comments", 0),
+                    "author":    (post.get("author") or {}).get("name", ""),
+                    "post_text": text[:300],
+                    "likes":     post.get("reactionsCount", 0),
+                    "shares":    post.get("sharesCount", 0),
+                    "comments":  post.get("commentsCount", 0),
                 },
             ))
 

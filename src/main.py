@@ -29,16 +29,17 @@ from retrieval import run_all_searches
 from crawler import crawl_all_sync
 from cascade import build_cascade
 from validator import validate_and_exit_on_failure
-from relevance_filter import apply_to_cascade, apply_to_cascade_with_images
+from relevance_filter import apply_to_cascade_with_images
 from geo_enricher import enrich_cascade
 
 console = Console()
 
 SOURCE_META = {
-    "google_lens": ("Tier 1 — Trial",  "100 free searches"),
-    "zenserp":     ("Tier 1 — Free",   "50/month forever"),
-    "yandex":      ("Tier 0 — Free",   "Playwright scrape"),
-    "twitter":     ("Tier 2 — Paid",   "$100/month"),
+    "google_vision": ("Tier 1 — Free",  "1,000/month free"),
+    "google_lens":   ("Tier 1 — Free",  "SerpAPI free tier"),
+    "twitter":       ("Tier 2 — Paid",  "pay per tweet read"),
+    "instagram":     ("Tier 1 — Apify", "$5 free credit/month"),
+    "facebook":      ("Tier 1 — Apify", "$5 free credit/month"),
 }
 
 
@@ -164,7 +165,10 @@ def print_demo_report(record: dict, case_id: str, image_path: str,
 def run(image_path: str, case_id: str, cases_base: str = "cases",
         demo: bool = False, keywords: list[str] = None) -> dict:
 
+    # "+trump" marks a keyword as required: pages must contain it to pass on text alone
     keywords = keywords or []
+    required = tuple(k[1:] for k in keywords if k.startswith("+") and len(k) > 1)
+    keywords = [k.lstrip("+") for k in keywords]
 
     console.print(Panel(
         f"[bold cyan]APMM Retrieval Pipeline[/bold cyan]\n"
@@ -189,7 +193,8 @@ def run(image_path: str, case_id: str, cases_base: str = "cases",
             image_path = _jpg_path
 
         t = progress.add_task("Step 2 — Reverse image search...", total=None)
-        hits = run_all_searches(image_path, sha256)
+        hits = run_all_searches(image_path, sha256,
+                                " ".join(keywords) or "misinformation")
         progress.remove_task(t)
 
         source_counts: dict[str, int] = {}
@@ -212,7 +217,9 @@ def run(image_path: str, case_id: str, cases_base: str = "cases",
         progress.remove_task(t)
 
         t = progress.add_task("Step 5 — Relevance filtering (OCR + HTML)...", total=None)
-        record = apply_to_cascade_with_images(record, keywords, case_dir, input_image_path=image_path)
+        record = apply_to_cascade_with_images(record, keywords, case_dir,
+                                              input_image_path=image_path,
+                                              required=required)
         progress.remove_task(t)
 
         t = progress.add_task("Step 6 — Validating...", total=None)
@@ -243,7 +250,8 @@ def main():
     parser.add_argument("--demo",      action="store_true",
                         help="Print formatted report for demos")
     parser.add_argument("--keywords",  nargs="+", default=[],
-                        help="Relevance filter keywords e.g. --keywords trump AI deepfake")
+                        help="Relevance keywords; prefix one with + to require it "
+                             "e.g. --keywords +trump jesus AI")
     args = parser.parse_args()
 
     if not Path(args.image).exists():
