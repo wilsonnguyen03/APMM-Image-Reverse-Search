@@ -109,6 +109,31 @@ details{margin-top:8px}
 summary{cursor:pointer;color:var(--ink2);font-size:13.5px;padding:6px 0}
 footer{padding:56px 0 64px;color:var(--ink3);font-size:12px}
 .empty{color:var(--ink3);padding:36px 0;text-align:center}
+.redge{fill:none;stroke-width:1.2;opacity:.45}
+#tree-svg.dim .rnode:not(.hot){opacity:.15}#tree-svg.dim .redge:not(.hot){opacity:.06}#tree-svg.dim .redge.hot{opacity:.9;stroke-width:1.8}
+.rnode{cursor:pointer}
+.glink{stroke-linecap:round;opacity:.5;fill:none}.glink.faded{opacity:.05}
+.gwrap{position:relative;height:min(78vh,720px);border:1px solid var(--line);border-radius:12px;overflow:hidden;background:var(--bg)}
+#g-svg{width:100%;height:100%;display:block;cursor:grab;touch-action:none}#g-svg:active{cursor:grabbing}
+.gnode{cursor:pointer;transition:opacity .15s}.gnode.faded{opacity:.12}.gnode.sel .node{stroke:var(--ink);stroke-width:2.5}
+.glabel{font-size:10.5px;fill:var(--ink2);pointer-events:none;paint-order:stroke;stroke:var(--bg);stroke-width:3px}.glabel.root{fill:#fff;font-weight:600;stroke:none}
+.side{display:none;position:absolute;top:10px;right:10px;bottom:10px;width:min(300px,70%);overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;box-shadow:0 4px 18px rgba(0,0,0,.12)}
+.side h4{font:600 16px var(--serif);margin-right:22px}.side p{font-size:12.5px;color:var(--ink3);margin:2px 0 10px}
+.side .x{position:absolute;top:8px;right:10px;border:none;background:none;font-size:20px;color:var(--ink3);cursor:pointer}
+.srow{display:block;padding:8px 0;border-top:1px solid var(--line);text-decoration:none}.srow:hover b{text-decoration:underline}
+.srow b{display:block;font-size:12.5px;font-weight:500;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.srow span{font-size:11.5px;color:var(--ink3)}
+.tl-sum{font-size:15px;color:var(--ink2);margin-bottom:14px;line-height:1.5}.tl-sum b{color:var(--ink)}
+.und{margin-top:26px;padding-top:18px;border-top:1px solid var(--line)}
+.und h3{font:600 15px var(--serif);display:flex;gap:10px;align-items:baseline}.und h3 span{font:400 12.5px var(--sans);color:var(--ink3)}
+.und-row{display:grid;grid-template-columns:150px 1fr;gap:12px;padding:8px 0;border-top:1px solid var(--line)}
+.und-row:first-of-type{border-top:none}
+.und-h{font-size:12.5px;font-weight:600;color:var(--ink)}.und-h em{font-style:normal;font-weight:400;color:var(--ink3);margin-left:4px}
+.und-chips{display:flex;flex-wrap:wrap;gap:5px}
+.uchip{font-size:11.5px;color:var(--ink2);border:1px solid var(--line);border-radius:99px;padding:1px 10px;text-decoration:none}
+.uchip:hover{border-color:var(--ink3);color:var(--ink)}.uchip.m{border-color:var(--ink);color:var(--ink)}
+@media(max-width:640px){.und-row{grid-template-columns:1fr}}
+.treekey{display:flex;flex-wrap:wrap;gap:6px 20px;margin-bottom:10px;align-items:center}
+.tip{display:none;position:absolute;pointer-events:none;background:var(--ink);color:var(--bg);font-size:12px;line-height:1.4;padding:6px 10px;border-radius:6px;white-space:pre;z-index:5}
 </style>
 </head>
 <body>
@@ -139,7 +164,7 @@ footer{padding:56px 0 64px;color:var(--ink3);font-size:12px}
   <main class="wrap">
     <section id="timeline">
       <h2>Timeline</h2>
-      <p class="sub">When each page published the image, one row per platform. Curves link a page to the one it likely came from.</p>
+      <p class="sub">When each page published the image, one row per platform, earliest on the left. Pages with no date are listed underneath.</p>
       <div class="card" id="tl-wrap"></div>
     </section>
 
@@ -194,8 +219,8 @@ const cssv=n=>getComputedStyle(document.documentElement).getPropertyValue(n).tri
 const dom=i=>(i.domain||'').replace('www.','');
 const validT=i=>i.timestamp&&!isNaN(new Date(i.timestamp));
 
-const PC={google_vision:'#4f7cac',google_lens:'#5f9c7a',twitter:'#2b2b2b',instagram:'#c45d85',facebook:'#5468b3',default:'#9a9488'};
-const PN={google_vision:'Google Vision',google_lens:'Google Lens',twitter:'X / Twitter',instagram:'Instagram',facebook:'Facebook'};
+const PC={google_vision:'#4f7cac',google_lens:'#5f9c7a',twitter:'var(--ink)',instagram:'#c45d85',facebook:'#5468b3',tiktok:'#1fb5b0',reddit:'#e8742a',default:'#9a9488'};
+const PN={google_vision:'Google Vision',google_lens:'Google Lens',twitter:'X / Twitter',instagram:'Instagram',facebook:'Facebook',tiktok:'TikTok',reddit:'Reddit'};
 const pc=p=>PC[p]||PC.default, pn=p=>PN[p]||p||'Unknown';
 
 /* ── loading ── */
@@ -258,78 +283,108 @@ ${validT(i)?fmtMin(new Date(i.timestamp).getTime())+' UTC':'No date'} · ${esc(p
 ${esc(i.country||'Unknown country')} · relevance ${(i.relevance_score||0).toFixed(2)}${i.image_match?' · image confirmed':''}`;
 
 /* ── timeline ── */
-let tlMode='time';
+let tlMode='time',tlLinks=false;
 function buildTimeline(){
   const wrap=$('tl-wrap');
   const all=ITEMS.filter(i=>i.relevant!==false);
   const dated=all.filter(validT).sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp));
   const undated=all.filter(i=>!validT(i));
-  if(!dated.length){wrap.innerHTML='<p class="empty">None of the relevant pages carry a publication date.</p>';return}
+  if(!dated.length&&!undated.length){wrap.innerHTML='<p class="empty">No relevant pages.</p>';return}
+  if(!dated.length){wrap.innerHTML=`<p class="empty">None of the relevant pages carry a publication date.</p>`+undatedHTML(undated);bindUndated(wrap,undated);return}
 
-  const W=1000,L=150,PW=W-L-50,n=dated.length;
+  const W=1000,L=130,PW=W-L-40,n=dated.length;
   const t=dated.map(i=>new Date(i.timestamp).getTime()),t0=t[0],t1=t[n-1],span=t1-t0;
   const frac=k=>tlMode==='order'?(n>1?k/(n-1):.5):(span?(t[k]-t0)/span:.5);
   const X={};dated.forEach((it,k)=>X[it.id]=L+20+frac(k)*PW);
-  undated.forEach((it,k)=>X[it.id]=L+20+(undated.length>1?k/(undated.length-1):.5)*PW);
+  const rOf=it=>4+(it.relevance_score||0)*4;
 
+  /* lanes: one per platform, ordered by first appearance; dots that would overlap are stacked */
   const lanes=[];dated.forEach(i=>{const p=i.source_platform||'unknown';if(!lanes.includes(p))lanes.push(p)});
-  if(undated.length)lanes.push('__und');
-  const CH0=14,CH=64,LANE0=CH0+CH+30,LH=38,H=LANE0+lanes.length*LH+36;
-  const laneY=p=>LANE0+lanes.indexOf(p)*LH+LH/2;
-  const Y={};dated.forEach(i=>Y[i.id]=laneY(i.source_platform||'unknown'));undated.forEach(i=>Y[i.id]=laneY('__und'));
+  const STEP=9,laneInfo={},Y={};
+  lanes.forEach(p=>{
+    const its=dated.filter(i=>(i.source_platform||'unknown')===p),placed=[];let maxS=0;
+    its.forEach(it=>{
+      const r=rOf(it),x=X[it.id];let s=0,k=0;
+      const free=sl=>placed.every(q=>Math.abs(q.x-x)>=r+q.r+1.5||Math.abs(q.sl-sl)*STEP>=r+q.r+1.5);
+      while(!free(s)){k++;s=k%2?(k+1)/2:-k/2}
+      placed.push({x,r,sl:s,id:it.id});maxS=Math.max(maxS,Math.abs(s))});
+    laneInfo[p]={placed,h:Math.max(44,(maxS*2+1)*STEP+20),cnt:its.length};
+  });
+  const CH0=14,CH=60,AX=CH0+CH+36;let yy=AX;
+  lanes.forEach(p=>{laneInfo[p].y=yy;yy+=laneInfo[p].h;laneInfo[p].placed.forEach(q=>Y[q.id]=laneInfo[p].y+laneInfo[p].h/2+q.sl*STEP)});
+  const bottom=yy,H=bottom+34;
 
   let bg='';
-  lanes.forEach((p,k)=>{
-    const y=LANE0+k*LH,und=p==='__und';
-    const cnt=und?undated.length:dated.filter(i=>(i.source_platform||'unknown')===p).length;
-    bg+=`<rect class="${k%2?'band-b':'band-a'}" x="0" y="${y}" width="${W}" height="${LH}"/>
-<circle cx="8" cy="${y+LH/2}" r="4" fill="${und?'var(--ink3)':pc(p)}"/>
-<text class="t-main" x="20" y="${y+LH/2+4.5}" font-size="12.5">${und?'No date':esc(pn(p))}</text>
-<text class="t-dim" x="${L-14}" y="${y+LH/2+4.5}" font-size="11.5" text-anchor="end">${cnt}</text>`;
-  });
-  const bottom=LANE0+lanes.length*LH,fmtT=span<3*864e5?fmtMin:fmtDay;let ticks='';
-  for(let k=0;k<=4;k++){
-    if(!span&&k>0)break;
-    const f=k/4;let x,tm;
+  lanes.forEach((p,k)=>{const li=laneInfo[p],c=li.y+li.h/2;
+    bg+=`<rect class="${k%2?'band-b':'band-a'}" x="0" y="${li.y}" width="${W}" height="${li.h}"/>
+<circle cx="10" cy="${c}" r="4.5" fill="${pc(p)}"/>
+<text class="t-ink" x="22" y="${c-1}" font-size="12.5" font-weight="600">${esc(pn(p))}</text>
+<text class="t-dim" x="22" y="${c+13}" font-size="11">${li.cnt} page${li.cnt>1?'s':''}</text>`});
+
+  /* axis: more ticks, year shown when it spans a year or more */
+  const fmtT=span<3*864e5?fmtMin:fmtDay,NT=span?6:0;let ticks='';
+  for(let k=0;k<=NT;k++){
+    const f=NT?k/NT:0;let x,tm;
     if(tlMode==='order'){const idx=Math.round(f*(n-1));x=X[dated[idx].id];tm=t[idx]}else{x=L+20+f*PW;tm=t0+f*span}
-    ticks+=`<line class="grid" x1="${x}" y1="${CH0}" x2="${x}" y2="${bottom}"/>
-<text class="t-dim" x="${x}" y="${bottom+20}" font-size="11.5" text-anchor="${k===0?'start':k===4?'end':'middle'}">${fmtT(tm)}</text>`;
-  }
+    ticks+=`<line class="grid" x1="${x}" y1="${AX-8}" x2="${x}" y2="${bottom}"/>
+<text class="t-dim" x="${x}" y="${AX-14}" font-size="11.5" text-anchor="${k===0?'start':k===NT?'end':'middle'}">${fmtT(tm)}</text>`}
+
+  /* cumulative curve */
   const base=CH0+CH;let d=`M${X[dated[0].id]},${base}`,prev=0;
   dated.forEach((it,k)=>{const x=X[it.id];d+=` L${x},${base-(prev/n)*(CH-6)} L${x},${base-((k+1)/n)*(CH-6)}`;prev=k+1});
   const area=`<path d="${d} L${X[dated[n-1].id]},${base} Z" fill="var(--accent)" opacity=".1"/><path d="${d}" fill="none" stroke="var(--accent)" stroke-width="1.6"/>
-<text class="t-dim" x="${L-14}" y="${CH0+10}" font-size="11.5" text-anchor="end">Cumulative</text>
-<text class="t-ink" x="${L-14}" y="${CH0+27}" font-size="15" font-weight="600" text-anchor="end">${n} pages</text>`;
+<text class="t-dim" x="${L-8}" y="${CH0+10}" font-size="11" text-anchor="end">Pages found so far</text>
+<text class="t-ink" x="${L-8}" y="${CH0+30}" font-size="16" font-weight="600" text-anchor="end">${n}</text>`;
 
   const byId={};dated.forEach(i=>byId[i.id]=i);let edges='';
-  (DATA.edges||[]).forEach(([p,c])=>{
+  if(tlLinks)(DATA.edges||[]).forEach(([p,c])=>{
     if(!byId[p]||!byId[c])return;
     const x1=X[p],y1=Y[p],x2=X[c],y2=Y[c],mx=(x1+x2)/2;
-    edges+=`<path class="edge" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}"/>`;
-  });
+    edges+=`<path class="edge" d="M${x1},${y1} C${mx},${y1} ${mx},${y2} ${x2},${y2}"/>`});
+
+  const first=dated[0],fx=X[first.id];
+  const callout=`<line x1="${fx}" y1="${AX-8}" x2="${fx}" y2="${bottom}" stroke="var(--accent)" stroke-width="1.2" stroke-dasharray="4 3"/>`;
   let nodes='';
-  dated.concat(undated).forEach(it=>{
-    const r=4.5+(it.relevance_score||0)*4.5,x=X[it.id],y=Y[it.id],und=!validT(it);
-    nodes+=(it.image_match?`<circle class="ring" cx="${x}" cy="${y}" r="${r+4.5}"/>`:'')+
-      `<circle class="node" data-id="${esc(it.id)}" cx="${x}" cy="${y}" r="${r}" fill="${und?'var(--ink3)':pc(it.source_platform)}"/>`;
-  });
-  const first=dated[0];
-  nodes+=`<text class="t-ink" x="${X[first.id]}" y="${Y[first.id]-15}" font-size="11" font-weight="600" text-anchor="middle">First seen</text>`;
+  dated.forEach(it=>{const r=rOf(it),x=X[it.id],y=Y[it.id];
+    nodes+=(it.image_match?`<circle class="ring" cx="${x}" cy="${y}" r="${r+3.5}"/>`:'')+
+      `<circle class="node" data-id="${esc(it.id)}" cx="${x}" cy="${y}" r="${r}" fill="${pc(it.source_platform)}"/>`});
+  nodes+=`<circle cx="${fx}" cy="${Y[first.id]}" r="${rOf(first)+7}" fill="none" stroke="var(--accent)" stroke-width="2"/>`;
 
+  /* plain-English summary */
   const conf=dated.filter(i=>i.image_match).length;
-  wrap.innerHTML=`<div class="ctl"><span class="sum">${span?`Spread over <b>${hms(span)}</b>`:'All at one moment'} · <b>${conf}</b> image-confirmed${undated.length?` · ${undated.length} undated`:''}</span>
-<span class="seg"><button class="${tlMode==='time'?'on':''}" data-m="time">Real time</button><button class="${tlMode==='order'?'on':''}" data-m="order">Evenly spaced</button></span></div>
-<svg viewBox="0 0 ${W} ${H}" style="width:100%;display:block">${bg}${ticks}${area}${edges}${nodes}</svg>
-<p class="note">Ringed dots contain the image itself · dot size shows relevance · click a dot to open the page</p>`;
+  const half=t[Math.floor((n-1)/2)]-t0;
+  const sum=`First seen <b>${fmtDay(t0)}</b> on <b>${esc(dom(first))}</b>. `+(span?`Half of the dated pages appeared within <b>${hms(Math.max(half,36e5))}</b> of it, and the latest is ${hms(span)} later.`:'All pages share one moment.');
 
-  const lookup={};dated.concat(undated).forEach(i=>lookup[i.id]=i);
+  wrap.innerHTML=`<div class="tl-sum">${sum}</div>
+<div class="ctl"><span class="sum"><b>${n}</b> dated · <b>${conf}</b> image-confirmed${undated.length?` · <a href="#tl-und">${undated.length} undated ↓</a>`:''}</span>
+<span style="display:flex;gap:12px;align-items:center"><label class="sum" style="display:flex;gap:6px;cursor:pointer"><input type="checkbox" id="tl-links" ${tlLinks?'checked':''} style="accent-color:var(--accent)">Show links</label>
+<span class="seg"><button class="${tlMode==='time'?'on':''}" data-m="time">Real time</button><button class="${tlMode==='order'?'on':''}" data-m="order">Evenly spaced</button></span></span></div>
+<svg viewBox="0 0 ${W} ${H}" style="width:100%;display:block">${bg}${ticks}${callout}${area}${edges}${nodes}</svg>
+<p class="note">Orange ring = first appearance · ringed dots contain the image itself · dot size = relevance · click a dot to open the page${tlMode==='time'?' · if most dots bunch together, try “Evenly spaced”':''}</p>
+${undatedHTML(undated)}`;
+
+  const lookup={};dated.forEach(i=>lookup[i.id]=i);
   wrap.querySelectorAll('.seg button').forEach(b=>b.onclick=()=>{tlMode=b.dataset.m;buildTimeline()});
-  wrap.querySelectorAll('.node').forEach(nd=>{
+  $('tl-links').onchange=e=>{tlLinks=e.target.checked;buildTimeline()};
+  wrap.querySelectorAll('svg .node').forEach(nd=>{
     const it=lookup[nd.dataset.id];
     nd.onmouseenter=nd.onmousemove=e=>showTip(tipFor(it),e.clientX,e.clientY);
     nd.onmouseleave=hideTip;
-    nd.onclick=()=>{if(/^https?:/.test(it.url||''))window.open(it.url,'_blank','noopener')};
-  });
+    nd.onclick=()=>{if(/^https?:/.test(it.url||''))window.open(it.url,'_blank','noopener')}});
+  bindUndated(wrap,undated);
+}
+/* undated pages: grouped by platform below the chart, not placed on the time axis */
+function undatedHTML(undated){
+  if(!undated.length)return '';
+  const g={};undated.forEach(i=>{const p=i.source_platform||'unknown';(g[p]=g[p]||[]).push(i)});
+  const rows=Object.keys(g).sort((a,b)=>g[b].length-g[a].length).map(p=>`<div class="und-row"><div class="und-h"><span class="dot" style="background:${pc(p)}"></span>${esc(pn(p))} <em>${g[p].length}</em></div><div class="und-chips">${
+    g[p].sort((a,b)=>(b.relevance_score||0)-(a.relevance_score||0)).map(i=>`<a class="uchip${i.image_match?' m':''}" data-id="${esc(i.id)}" href="${esc(i.url||'#')}" target="_blank" rel="noopener">${esc(dom(i)||'page')}</a>`).join('')}</div></div>`).join('');
+  return `<div class="und" id="tl-und"><h3>No publication date <span>${undated.length} pages</span></h3><p class="note" style="margin:2px 0 10px">These pages showed no date, so they can’t be placed in time. Highlighted chips contain the image itself.</p>${rows}</div>`;
+}
+function bindUndated(wrap,undated){
+  const lookup={};undated.forEach(i=>lookup[i.id]=i);
+  wrap.querySelectorAll('.uchip').forEach(c=>{const it=lookup[c.dataset.id];
+    c.onmouseenter=c.onmousemove=e=>showTip(tipFor(it),e.clientX,e.clientY);c.onmouseleave=hideTip});
 }
 
 /* ── map ── */
@@ -486,30 +541,111 @@ function buildPages(){
   $('q').oninput=draw;$('onlyrel').onchange=draw;draw();
 }
 
-/* ── tree ── */
+/* ── tree (force graph) ── */
 function buildTree(){
   const wrap=$('tree-wrap'),edges=DATA.edges||[],rootId=DATA.root_id;
   if(!edges.length){wrap.innerHTML='<p class="empty">No links in this file.</p>';return}
   const iById={};(DATA.items||[]).forEach(i=>{iById[i.id]=i});
-  const children={};edges.forEach(([p,c])=>{(children[p]=children[p]||[]).push(c)});
-  const lCounts={},layout={},queue=[{id:rootId,depth:0}];
-  while(queue.length){const{id,depth}=queue.shift();if(layout[id])continue;lCounts[depth]=lCounts[depth]||0;layout[id]={depth,pos:lCounts[depth]++};(children[id]||[]).forEach(c=>queue.push({id:c,depth:depth+1}))}
-  const maxD=Math.max(...Object.values(layout).map(n=>n.depth)),NW=150,NH=40,GX=168,GY=78;
-  const W=Math.max(900,Math.max(...Object.values(lCounts))*GX+60),H=(maxD+1)*GY+30;
-  Object.keys(lCounts).forEach(d=>{
-    const offX=(W-lCounts[d]*GX)/2;
-    Object.keys(layout).filter(id=>layout[id].depth==d).forEach((id,k)=>{layout[id].x=offX+k*GX+GX/2;layout[id].y=34+d*GY});
-  });
-  let eh='',nh='';
-  edges.forEach(([p,c])=>{const a=layout[p],b=layout[c];if(a&&b)eh+=`<path class="edge" d="M${a.x},${a.y+NH/2} C${a.x},${(a.y+b.y)/2} ${b.x},${(a.y+b.y)/2} ${b.x},${b.y-NH/2}"/>`});
-  Object.keys(layout).forEach(id=>{
-    const n=layout[id],it=iById[id],root=id===rootId;
-    const name=root?'Input image':dom(it||{})||'?',lbl=name.length>20?name.slice(0,18)+'…':name;
-    nh+=`<rect x="${n.x-NW/2}" y="${n.y-NH/2}" width="${NW}" height="${NH}" rx="8" fill="var(--card)" stroke="${root?'var(--accent)':'var(--line)'}" stroke-width="${root?1.6:1}"/>
-<text class="t-ink" x="${n.x}" y="${n.y-3}" font-size="12" font-weight="600" text-anchor="middle">${esc(lbl)}</text>
-<text class="t-dim" x="${n.x}" y="${n.y+12}" font-size="10.5" text-anchor="middle">${root?'root':esc(pn(it&&it.source_platform))+(it&&it.relevance_score!=null?' · '+it.relevance_score.toFixed(2):'')}</text>`;
-  });
-  wrap.innerHTML=`<svg viewBox="0 0 ${W} ${H}" style="width:100%;min-width:${Math.min(W,900)}px;display:block">${eh}${nh}</svg>`;
+  wrap.classList.remove('scroll');
+  wrap.innerHTML=`<div class="ctl"><div class="seg" id="g-mode"><button class="on" data-m="d">By domain</button><button data-m="p">Every page</button></div>
+<span class="sum">Scroll to zoom · drag to pan · drag a ball to move it · click for details</span>
+<span><button class="btn" id="g-in">+</button> <button class="btn" id="g-out">−</button> <button class="btn" id="g-fit">Reset</button></span></div>
+<div class="treekey" id="g-key"></div>
+<div class="gwrap"><svg id="g-svg"><g id="g-view"></g></svg><div id="tree-tip" class="tip"></div><div id="g-side" class="side"></div></div>`;
+  const svg=$('g-svg'),view=$('g-view'),tip=$('tree-tip'),side=$('g-side');
+  const NS='http://www.w3.org/2000/svg',mk=(t,a)=>{const e=document.createElementNS(NS,t);for(const k in a)e.setAttribute(k,a[k]);return e};
+  let mode='d',nodes=[],links=[],byId={},sel=null,hov=null,alpha=1,raf=0,K=1,TX=0,TY=0,drag=null,W=0,H=0;
+
+  function model(){
+    const key=id=>{if(id===rootId||mode==='p')return id;const it=iById[id];return dom(it||{})||id};
+    byId={};nodes=[];
+    const get=id=>{const k=key(id);if(!byId[k]){const n={id:k,items:[],x:0,y:0,vx:0,vy:0,root:id===rootId};byId[k]=n;nodes.push(n)}return byId[k]};
+    (DATA.items||[]).forEach(it=>{if(it.id!==rootId)get(it.id).items.push(it)});
+    get(rootId);
+    const seenL={};links=[];
+    edges.forEach(([p,c])=>{const a=get(p),b=get(c);if(a===b)return;const k=a.id+'>'+b.id;
+      if(seenL[k]){seenL[k].w++;return}seenL[k]={s:a,t:b,w:1};links.push(seenL[k])});
+    nodes.forEach((n,i)=>{
+      const cnt=n.items.length;n.count=cnt;n.r=n.root?16:5+4.2*Math.sqrt(cnt);
+      const pl={};n.items.forEach(x=>{pl[x.source_platform]=(pl[x.source_platform]||0)+1});
+      n.platform=Object.keys(pl).sort((a,b)=>pl[b]-pl[a])[0];
+      n.match=n.items.some(x=>x.image_match);
+      n.rel=n.items.filter(x=>x.relevant).length;
+      n.label=n.root?'INPUT':(mode==='d'?n.id:(dom(n.items[0]||{})||'?'));
+      const ang=i*2.399963,rr=30+14*Math.sqrt(i);n.x=Math.cos(ang)*rr;n.y=Math.sin(ang)*rr;n.vx=n.vy=0;
+      if(n.root){n.x=n.y=0;n.fx=0;n.fy=0}
+    });
+    const nb={};nodes.forEach(n=>nb[n.id]=new Set([n.id]));links.forEach(l=>{nb[l.s.id].add(l.t.id);nb[l.t.id].add(l.s.id)});nodes.forEach(n=>n.nb=nb[n.id]);
+  }
+  function render(){
+    view.innerHTML='';
+    links.forEach(l=>{l.el=mk('line',{class:'glink'});l.el.style.stroke=pc((l.t.items[0]||{}).source_platform);l.el.style.strokeWidth=Math.min(1+Math.log2(l.w),4);view.appendChild(l.el)});
+    nodes.forEach(n=>{
+      const g=mk('g',{class:'gnode'});
+      if(n.root)g.appendChild(mk('circle',{r:n.r+6,fill:'none',stroke:'var(--accent)','stroke-width':1.5,opacity:.4}));
+      const c=mk('circle',{class:'node',r:n.r,fill:n.root?'var(--accent)':pc(n.platform)});
+      if(!n.root&&n.items.length&&!n.rel&&!n.match)c.setAttribute('opacity','.5');
+      g.appendChild(c);
+      if(n.match)g.appendChild(mk('circle',{class:'ring',r:n.r+3.5}));
+      const t=mk('text',{class:n.root?'glabel root':'glabel',y:n.root?4:n.r+11,'text-anchor':'middle'});
+      t.textContent=n.root?'INPUT':(n.label.length>22?n.label.slice(0,20)+'…':n.label)+(n.count>1?' ·'+n.count:'');
+      g.appendChild(t);n.el=g;n.txt=t;view.appendChild(g);
+      g.onmouseenter=()=>{hov=n;paint()};g.onmouseleave=()=>{hov=null;tip.style.display='none';paint()};
+      g.onmousemove=e=>{const b=svg.parentNode.getBoundingClientRect();tip.textContent=n.root?'Input image':`${n.label}\n${n.count} page${n.count>1?'s':''} · ${n.rel} relevant${n.match?' · image match':''}`;tip.style.display='block';tip.style.left=(e.clientX-b.left+14)+'px';tip.style.top=(e.clientY-b.top+14)+'px'};
+      g.onpointerdown=e=>{e.stopPropagation();drag={n,moved:false,x:e.clientX,y:e.clientY};g.setPointerCapture(e.pointerId);n.fx=n.x;n.fy=n.y;kick(.3)};
+    });
+    const used=[...new Set(nodes.filter(n=>!n.root).map(n=>n.platform))];
+    $('g-key').innerHTML=used.map(p=>`<span class="lg"><span class="dot" style="background:${pc(p)}"></span>${esc(pn(p))}</span>`).join('')+`<span class="lg"><svg width="16" height="16"><circle cx="8" cy="8" r="4" fill="var(--ink3)"/><circle cx="8" cy="8" r="7" class="ring"/></svg> image match</span><span class="lg">ball size = pages</span><span class="lg">faded = not relevant</span>`;
+  }
+  function paint(){
+    const f=hov||sel;
+    nodes.forEach(n=>{n.el.classList.toggle('faded',!!f&&!f.nb.has(n.id));n.el.classList.toggle('sel',n===sel);
+      n.txt.style.display=(n.root||n.count>1||K>=1.5||n===hov||(f&&f.nb.has(n.id)))?'':'none'});
+    links.forEach(l=>l.el.classList.toggle('faded',!!f&&!(l.s===f||l.t===f)));
+  }
+  function place(){
+    nodes.forEach(n=>n.el.setAttribute('transform',`translate(${n.x},${n.y})`));
+    links.forEach(l=>{l.el.setAttribute('x1',l.s.x);l.el.setAttribute('y1',l.s.y);l.el.setAttribute('x2',l.t.x);l.el.setAttribute('y2',l.t.y)});
+  }
+  function tick(){
+    const N=nodes.length;
+    for(let i=0;i<N;i++){const a=nodes[i];
+      for(let j=i+1;j<N;j++){const b=nodes[j];let dx=b.x-a.x,dy=b.y-a.y,d2=dx*dx+dy*dy||.01,d=Math.sqrt(d2);
+        const f=Math.min(9000/d2,10)*alpha,min=a.r+b.r+10;let fx=dx/d*f,fy=dy/d*f;
+        if(d<min){const p=(min-d)*.15;fx+=dx/d*p;fy+=dy/d*p}
+        a.vx-=fx;a.vy-=fy;b.vx+=fx;b.vy+=fy}
+      const gv=a.nb.size>1?.006:.035;a.vx-=a.x*gv*alpha;a.vy-=a.y*gv*alpha}
+    links.forEach(l=>{const a=l.s,b=l.t;let dx=b.x-a.x,dy=b.y-a.y,d=Math.sqrt(dx*dx+dy*dy)||.01;
+      const rest=a.r+b.r+85,f=(d-rest)*.04*alpha;dx/=d;dy/=d;a.vx+=dx*f;a.vy+=dy*f;b.vx-=dx*f;b.vy-=dy*f});
+    nodes.forEach(n=>{if(n.fx!=null){n.x=n.fx;n.y=n.fy;n.vx=n.vy=0;return}n.vx*=.62;n.vy*=.62;n.x+=n.vx;n.y+=n.vy});
+    alpha*=.985;
+  }
+  function loop(){raf=0;for(let i=0;i<2;i++)tick();place();if(alpha>.02||drag)raf=requestAnimationFrame(loop)}
+  function kick(a){alpha=Math.max(alpha,a);if(!raf)raf=requestAnimationFrame(loop)}
+  function apply(){view.setAttribute('transform',`translate(${TX},${TY}) scale(${K})`);paint()}
+  function size(){const b=svg.getBoundingClientRect();W=b.width;H=b.height}
+  function fit(){size();let x0=1e9,y0=1e9,x1=-1e9,y1=-1e9;nodes.forEach(n=>{x0=Math.min(x0,n.x-n.r-30);x1=Math.max(x1,n.x+n.r+30);y0=Math.min(y0,n.y-n.r-20);y1=Math.max(y1,n.y+n.r+30)});
+    K=Math.min(W/(x1-x0),H/(y1-y0),2);TX=W/2-K*(x0+x1)/2;TY=H/2-K*(y0+y1)/2;apply()}
+  function zoomAt(f,cx,cy){const k=Math.min(8,Math.max(.15,K*f));TX=cx-(cx-TX)*k/K;TY=cy-(cy-TY)*k/K;K=k;apply()}
+  function show(n){
+    sel=n;paint();if(!n){side.style.display='none';return}
+    const rows=n.items.slice().sort((a,b)=>(b.relevance_score||0)-(a.relevance_score||0)).map(i=>`<a class="srow" href="${esc(i.url)}" target="_blank" rel="noopener"><b>${esc(i.title||dom(i)||i.url)}</b><span>${esc(pn(i.source_platform))}${i.relevance_score!=null?' · '+i.relevance_score.toFixed(2):''}${i.image_match?' · match':''}${validT(i)?' · '+fmtDay(new Date(i.timestamp).getTime()):''}</span></a>`).join('');
+    side.innerHTML=`<button class="x" id="g-x">×</button><h4>${n.root?'Input image':esc(n.label)}</h4><p>${n.root?'Where the search started.':n.count+' page'+(n.count>1?'s':'')+' · '+n.rel+' relevant'}</p>${rows}`;
+    side.style.display='block';$('g-x').onclick=()=>show(null);
+  }
+  svg.onpointerdown=e=>{drag={pan:true,x:e.clientX,y:e.clientY,tx:TX,ty:TY,moved:false};svg.setPointerCapture(e.pointerId)};
+  svg.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(Math.abs(dx)+Math.abs(dy)>3)drag.moved=true;
+    if(drag.pan){TX=drag.tx+dx;TY=drag.ty+dy;apply()}
+    else{const b=svg.getBoundingClientRect();drag.n.fx=(e.clientX-b.left-TX)/K;drag.n.fy=(e.clientY-b.top-TY)/K;drag.n.x=drag.n.fx;drag.n.y=drag.n.fy;kick(.3)}};
+  svg.onpointerup=()=>{if(!drag)return;const d=drag;drag=null;
+    if(d.pan){if(!d.moved)show(null)}else{if(!d.moved)show(d.n);if(!d.n.root){d.n.fx=null;d.n.fy=null}kick(.2)}};
+  svg.onwheel=e=>{e.preventDefault();const b=svg.getBoundingClientRect();zoomAt(Math.exp(-e.deltaY*.0015),e.clientX-b.left,e.clientY-b.top)};
+  $('g-in').onclick=()=>{size();zoomAt(1.4,W/2,H/2)};$('g-out').onclick=()=>{size();zoomAt(1/1.4,W/2,H/2)};$('g-fit').onclick=fit;
+  $('g-mode').onclick=e=>{const m=e.target.dataset&&e.target.dataset.m;if(!m||m===mode)return;mode=m;
+    $('g-mode').querySelectorAll('button').forEach(b=>b.classList.toggle('on',b.dataset.m===m));show(null);model();render();alpha=1;
+    for(let i=0;i<250;i++)tick();place();fit();alpha=.3;kick(.3)};
+  model();render();size();for(let i=0;i<300;i++)tick();place();fit();alpha=.05;kick(.05);
+  window.addEventListener('resize',fit);
 }
 </script>
 </body>

@@ -133,9 +133,9 @@ def test_validator(valid_record: dict):
     print("  3e Degenerate case: PASS")
 
 
-SOURCES = ["google_vision", "google_lens", "twitter", "instagram", "facebook"]
+SOURCES = ["google_vision", "google_lens", "twitter", "instagram", "facebook", "tiktok", "reddit"]
 KEY_VARS = ["GOOGLE_VISION_KEY", "SERPAPI_KEY", "IMGBB_API_KEY",
-            "TWITTER_BEARER_TOKEN", "APIFY_TOKEN"]
+            "APIFY_TOKEN"]
 
 
 def test_platforms():
@@ -233,31 +233,55 @@ def test_lens():
                 assert len(retrieval.search_google_lens(img)) == 1   # cap applies before image-URL filter
         with _env(SERPAPI_KEY="k"):                                   # imgbb key missing
             assert retrieval.search_google_lens(img) == []
+        # imgbb times out twice, then works: Lens still runs
+        flaky = MagicMock(side_effect=[retrieval.requests.Timeout("slow"),
+                                       retrieval.requests.Timeout("slow"),
+                                       _resp({"data": {"url": "https://i.ibb.co/x.jpg"}})])
+        with _env(SERPAPI_KEY="k", IMGBB_API_KEY="k"), patch.object(retrieval.time, "sleep"), \
+             patch.object(retrieval.requests, "post", flaky), \
+             patch.object(retrieval.requests, "get", get):
+            assert len(retrieval.search_google_lens(img)) == 5 and flaky.call_count == 3
+        # imgbb down for every attempt: gives up after IMGBB_ATTEMPTS, no SerpAPI call
+        down = MagicMock(side_effect=retrieval.requests.Timeout("slow"))
+        get2 = MagicMock()
+        with _env(SERPAPI_KEY="k", IMGBB_API_KEY="k"), patch.object(retrieval.time, "sleep"), \
+             patch.object(retrieval.requests, "post", down), \
+             patch.object(retrieval.requests, "get", get2):
+            assert retrieval.search_google_lens(img) == []
+            assert down.call_count == retrieval.IMGBB_ATTEMPTS and not get2.called
     finally:
         os.unlink(img)
     print("  PASS")
 
 
 def test_twitter():
-    print("\n── Test 7: Twitter / X ──")
-    payload = {
-        "data": [{"id": "9", "created_at": "2024-02-01T00:00:00Z", "author_id": "u1",
-                  "text": "hello", "attachments": {"media_keys": ["m1"]}}],
-        "includes": {"media": [{"media_key": "m1", "url": "https://pbs.twimg.com/m1.jpg"}],
-                     "users": [{"id": "u1", "username": "bob", "location": "Sydney"}]},
-    }
-    with _env(TWITTER_BEARER_TOKEN="t"), \
-         patch.object(retrieval.requests, "get", return_value=_resp(payload)) as g:
-        hits = retrieval.search_twitter("deepfake")
-        assert len(hits) == 1
+    print("\n── Test 7: Apify Twitter / X ──")
+    # Shape from the apidojo/tweet-scraper docs
+    dataset = [
+        {"url": "https://x.com/bob/status/9", "id": "9", "text": "hello",
+         "createdAt": "Fri Nov 24 17:49:36 +0000 2023", "likeCount": 7, "retweetCount": 2,
+         "replyCount": 1, "author": {"userName": "bob", "location": "Sydney"},
+         "extendedEntities": {"media": [{"media_url_https": "https://pbs.twimg.com/m1.jpg"}]}},
+        {"url": "https://x.com/amy/status/10", "text": "no date or media", "author": None},
+        {"text": "no url"},                               # dropped
+    ]
+    calls = []
+    post, get = _apify_router(dataset, calls)
+    with _env(APIFY_TOKEN="t"), patch.object(retrieval.time, "sleep"), \
+         patch.object(retrieval.requests, "post", post), patch.object(retrieval.requests, "get", get):
+        hits = retrieval.search_twitter("deepfake", since="2023-03-01", until="2023-04-01")
+        assert len(hits) == 2
         h = hits[0]
-        assert h["source_platform"] == "twitter" and h["url"].endswith("/9")
+        assert h["source_platform"] == "twitter" and h["url"] == "https://x.com/bob/status/9"
         assert h["author"] == "bob" and h["location"] == "Sydney"
         assert h["matched_image_url"] == "https://pbs.twimg.com/m1.jpg"
-        assert h["timestamp"] == "2024-02-01T00:00:00Z"
-        assert "deepfake" in g.call_args.kwargs["params"]["query"]
+        assert h["timestamp"] == "2023-11-24T17:49:36+00:00"
+        assert (h["likes"], h["shares"], h["comments"]) == (7, 2, 1)
+        assert hits[1]["timestamp"] == "" and hits[1]["author"] == "" and hits[1]["matched_image_url"] is None
+        q = calls[0][2]["searchTerms"][0]
+        assert "deepfake" in q and "since:2023-03-01" in q and "until:2023-04-01" in q
+        assert "apidojo~tweet-scraper" in calls[0][1]
     print("  PASS")
-
 
 def test_instagram():
     print("\n── Test 8: Apify Instagram ──")
@@ -313,6 +337,69 @@ def test_facebook():
     print("  PASS")
 
 
+def test_tiktok():
+    print("\n── Test 9b: Apify TikTok ──")
+    # Shape from the xmolodtsov/tiktok-search-scraper docs
+    dataset = [
+        {"postPage": "https://www.tiktok.com/@a/video/1", "title": "pope puffer",
+         "uploadedAtFormatted": "2023-03-25T10:00:00.000Z", "views": 9, "likes": 3,
+         "shares": 2, "comments": 1, "channel": {"username": "a"},
+         "video": {"url": "https://cdn/signed", "cover": "https://cdn/c.jpg"}},
+        {"postPage": "https://www.tiktok.com/@b/video/2", "title": None, "video": None},
+        {"title": "no url"},                              # dropped
+    ]
+    calls = []
+    post, get = _apify_router(dataset, calls)
+    with _env(APIFY_TOKEN="t"), patch.object(retrieval.time, "sleep"), \
+         patch.object(retrieval.requests, "post", post), patch.object(retrieval.requests, "get", get):
+        hits = retrieval.search_apify_tiktok("pope puffer")
+        assert len(hits) == 2
+        h = hits[0]
+        assert h["source_platform"] == "tiktok" and h["url"].endswith("/video/1")
+        assert h["matched_image_url"] == "https://cdn/c.jpg" and h["author"] == "a"
+        assert h["timestamp"] == "2023-03-25T10:00:00.000Z"
+        assert (h["views"], h["likes"], h["shares"], h["comments"]) == (9, 3, 2, 1)
+        assert hits[1]["timestamp"] == "" and hits[1]["matched_image_url"] == ""
+        assert calls[0][2]["keywords"] == ["pope puffer"]
+        assert "xmolodtsov~tiktok-search-scraper" in calls[0][1]
+    print("  PASS")
+
+def test_reddit():
+    print("\n── Test 9c: Apify Reddit ──")
+    # Shape from the fatihtahta/reddit-scraper-search-fast docs
+    dataset = [
+        {"kind": "post", "url": "https://www.reddit.com/r/pics/comments/a/x/", "title": "Pope puffer",
+         "body": "is it real?", "created_utc": "2023-03-25T10:09:56.000Z", "author": "u1",
+         "subreddit": "pics", "score": 99, "num_comments": 12, "thumbnail": "https://b.thumbs/t.jpg",
+         "gallery_images": [{"url": "https://preview.redd.it/g.jpg"}]},
+        {"kind": "post", "url": "https://www.reddit.com/r/x/comments/b/y/", "title": "t",
+         "thumbnail": "self", "url_overridden_by_dest": "https://i.redd.it/pic.png"},
+        {"kind": "post", "url": "https://www.reddit.com/r/x/comments/c/z/", "title": "t",
+         "thumbnail": "self"},
+        {"kind": "comment", "url": "https://www.reddit.com/r/x/comments/c/z/d/"},   # dropped
+        {"title": "no url"},                                                         # dropped
+    ]
+    calls = []
+    post, get = _apify_router(dataset, calls)
+    with _env(APIFY_TOKEN="t"), patch.object(retrieval.time, "sleep"),          patch.object(retrieval.requests, "post", post), patch.object(retrieval.requests, "get", get):
+        hits = retrieval.search_apify_reddit("pope puffer", since="2023-03-01", until="2023-04-01")
+        assert len(hits) == 3
+        h = hits[0]
+        assert h["source_platform"] == "reddit" and h["subreddit"] == "pics" and h["author"] == "u1"
+        assert h["matched_image_url"] == "https://preview.redd.it/g.jpg"       # gallery first
+        assert h["timestamp"] == "2023-03-25T10:09:56.000Z"
+        assert (h["likes"], h["comments"]) == (99, 12)
+        assert hits[1]["matched_image_url"] == "https://i.redd.it/pic.png"     # direct image next
+        assert hits[2]["matched_image_url"] == ""                              # "self" thumbnail ignored
+        inp = calls[0][2]
+        assert inp["queries"] == ["pope puffer"] and inp["dateFrom"] == "2023-03-01" and inp["dateTo"] == "2023-04-01"
+        assert "fatihtahta~reddit-scraper-search-fast" in calls[0][1]
+        calls.clear()
+        retrieval.search_apify_reddit("x")
+        assert "dateFrom" not in calls[0][2] and "dateTo" not in calls[0][2]
+    print("  PASS")
+
+
 def test_apify_failure():
     print("\n── Test 10: Apify run failure ──")
     post = MagicMock(return_value=_resp({"data": {"id": "run1"}}))
@@ -321,6 +408,8 @@ def test_apify_failure():
          patch.object(retrieval.requests, "post", post), patch.object(retrieval.requests, "get", get):
         assert retrieval.search_apify_instagram("x y z") == []
         assert retrieval.search_apify_facebook("x") == []
+        assert retrieval.search_apify_tiktok("x") == []
+        assert retrieval.search_apify_reddit("x") == []
     print("  PASS")
 
 
@@ -336,9 +425,11 @@ def test_missing_keys_and_errors():
             assert retrieval.search_twitter() == []
             assert retrieval.search_apify_instagram("x") == []
             assert retrieval.search_apify_facebook("x") == []
+            assert retrieval.search_apify_tiktok("x") == []
+            assert retrieval.search_apify_reddit("x") == []
             assert not boom.called, "a keyless source made an HTTP call"
         with _env(GOOGLE_VISION_KEY="k", SERPAPI_KEY="k", IMGBB_API_KEY="k",
-                  TWITTER_BEARER_TOKEN="k", APIFY_TOKEN="k"), \
+                  APIFY_TOKEN="k"), \
              patch.object(retrieval.requests, "post", boom), \
              patch.object(retrieval.requests, "get", boom), \
              patch.object(retrieval.time, "sleep"):
@@ -347,33 +438,107 @@ def test_missing_keys_and_errors():
             assert retrieval.search_twitter() == []
             assert retrieval.search_apify_instagram("x") == []
             assert retrieval.search_apify_facebook("x") == []
+            assert retrieval.search_apify_tiktok("x") == []
+            assert retrieval.search_apify_reddit("x") == []
     finally:
         os.unlink(img)
     print("  PASS")
 
 
 def test_run_all_searches():
-    print("\n── Test 12: Merge, dedup and total cap ──")
+    print("\n── Test 12: Merge, dedup and caps ──")
     mk = lambda src, *urls: [retrieval._hit(u, src) for u in urls]
-    fakes = {
-        "search_google_vision":  mk("google_vision", "https://a.com", "https://b.com"),
-        "search_google_lens":    mk("google_lens", "https://b.com", "https://c.com"),   # b.com duplicate
-        "search_twitter":        mk("twitter", "https://t.com"),
-        "search_apify_instagram": mk("instagram", "https://i.com"),
-        "search_apify_facebook": mk("facebook", "https://f.com"),
-    }
-    with ExitStack() as st:
-        for name, val in fakes.items():
-            st.enter_context(patch.object(retrieval, name, return_value=val))
-        merged = retrieval.run_all_searches("img.jpg", "sha")
-        urls = [h["url"] for h in merged]
-        assert urls == ["https://a.com", "https://b.com", "https://c.com",
-                        "https://t.com", "https://i.com", "https://f.com"], urls
-        with patch.object(retrieval, "MAX_TOTAL_HITS", 3):
-            capped = retrieval.run_all_searches("img.jpg", "sha")
-            assert [h["url"] for h in capped] == ["https://a.com", "https://b.com", "https://c.com"]
-            # Priority order: earlier sources fill the cap first, later ones are dropped.
-            assert {h["source_platform"] for h in capped} == {"google_vision", "google_lens"}
+    names = {"search_google_vision": "google_vision", "search_google_lens": "google_lens",
+             "search_twitter": "twitter", "search_apify_instagram": "instagram",
+             "search_apify_facebook": "facebook", "search_apify_tiktok": "tiktok",
+             "search_apify_reddit": "reddit"}
+
+    def run(fakes, **limits):
+        with ExitStack() as st:
+            for name, src in names.items():
+                st.enter_context(patch.object(retrieval, name, return_value=mk(src, *fakes.get(src, []))))
+            for k, v in limits.items():
+                st.enter_context(patch.object(retrieval, k, v))
+            return retrieval.run_all_searches("img.jpg", "sha")
+
+    # Dedup: same page in different spellings counts once, Google wins; same domain is fine
+    merged = run({"google_vision": ["https://a.com/p", "https://a.com/q"],
+                  "google_lens":   ["https://www.a.com/p/?utm_source=x", "https://c.com"],
+                  "twitter":       ["https://twitter.com/u/status/1"],
+                  "instagram":     ["https://instagram.com/p/1"],
+                  "facebook":      ["https://facebook.com/p/1", "https://m.facebook.com/p/1"],
+                  "tiktok":        ["https://tiktok.com/@a/video/1"],
+                  "reddit":        ["https://reddit.com/r/x/1", "https://old.reddit.com/r/x/1"]})
+    urls = [h["url"] for h in merged]
+    assert urls == ["https://a.com/p", "https://a.com/q", "https://c.com",
+                    "https://twitter.com/u/status/1", "https://instagram.com/p/1",
+                    "https://facebook.com/p/1", "https://tiktok.com/@a/video/1",
+                    "https://reddit.com/r/x/1"], urls
+    assert retrieval._url_key("https://twitter.com/a/status/1/") == retrieval._url_key("https://x.com/a/status/1")
+    assert retrieval._url_key("https://youtube.com/watch?v=1") != retrieval._url_key("https://youtube.com/watch?v=2")
+
+    # Cap: Google is the majority, each social platform keeps its quota
+    google = [f"https://g{i}.com" for i in range(80)]
+    social = {p: [f"https://{p}.com/{i}" for i in range(9)] for p in retrieval.SOCIAL_PLATFORMS}
+    merged = run({"google_vision": google, **social})
+    by = {}
+    for h in merged:
+        by[h["source_platform"]] = by.get(h["source_platform"], 0) + 1
+    assert len(merged) == 100 and by["google_vision"] == 70, by
+    assert all(by[p] == retrieval.SOCIAL_QUOTA for p in retrieval.SOCIAL_PLATFORMS), by
+
+    # Social results beyond the quota only fill slots Google leaves unused
+    merged = run({"google_vision": google[:10], **social})
+    by = {}
+    for h in merged:
+        by[h["source_platform"]] = by.get(h["source_platform"], 0) + 1
+    assert len(merged) == 10 + 45 and by["google_vision"] == 10 and by["reddit"] == 9, by
+    assert [h["url"] for h in merged][:10] == google[:10]       # Google listed first
+
+    # A platform with no results does not eat its slots: Google takes them
+    merged = run({"google_vision": google, "reddit": ["https://reddit.com/r/x/1"]})
+    assert len(merged) == 81, len(merged)
+    print("  PASS")
+
+
+def test_earliest_window():
+    print("\n\u2500\u2500 Test 13: --since alone searches only the following 14 days \u2500\u2500")
+    seen = {}
+    def fake(name):
+        def f(q, since=None, until=None):
+            seen[name] = (since, until)
+            return []
+        return f
+    def run(since, until):
+        with ExitStack() as st:
+            for n in ("search_google_vision", "search_google_lens"):
+                st.enter_context(patch.object(retrieval, n, return_value=[]))
+            for n in ("search_apify_instagram", "search_apify_facebook", "search_apify_tiktok"):
+                st.enter_context(patch.object(retrieval, n, return_value=[]))
+            st.enter_context(patch.object(retrieval, "search_twitter", side_effect=fake("twitter")))
+            st.enter_context(patch.object(retrieval, "search_apify_reddit", side_effect=fake("reddit")))
+            retrieval.run_all_searches("img.jpg", "sha", "q", since, until)
+    run("2023-03-20", None)
+    assert seen["twitter"] == seen["reddit"] == ("2023-03-20", "2023-04-03"), seen
+    run("2023-03-20", "2023-12-31")                      # explicit --until wins
+    assert seen["twitter"] == ("2023-03-20", "2023-12-31"), seen
+    run(None, None)                                      # no dates: unrestricted
+    assert seen["twitter"] == (None, None), seen
+    run("not-a-date", None)                              # bad date: no crash, no window
+    assert seen["twitter"] == ("not-a-date", None), seen
+    print("  PASS")
+
+
+def test_in_window():
+    print("\n\u2500\u2500 Test 14: Social hits outside the date window are dropped \u2500\u2500")
+    mk = lambda ts: retrieval._hit("https://x.com/" + str(ts), "instagram", extra={"timestamp": ts})
+    hits = [mk("2023-03-25T10:00:00.000Z"), mk("2026-10-13T21:10:28.000Z"), mk(""), mk("garbage"),
+            mk("2023-04-03T23:59:00Z"), mk("2023-04-04T00:00:01Z")]
+    kept = [h["timestamp"] for h in retrieval._in_window(hits, "2023-03-20", "2023-04-03")]
+    assert kept == ["2023-03-25T10:00:00.000Z", "", "garbage", "2023-04-03T23:59:00Z"], kept   # undated kept
+    assert retrieval._in_window(hits, None, None) == hits                                        # no window: untouched
+    assert len(retrieval._in_window(hits, "2026-01-01", None)) == 3                              # open-ended
+    assert retrieval._in_window([], "2023-03-20", "2023-04-03") == []
     print("  PASS")
 
 
@@ -389,9 +554,13 @@ if __name__ == "__main__":
     test_twitter()
     test_instagram()
     test_facebook()
+    test_tiktok()
+    test_reddit()
     test_apify_failure()
     test_missing_keys_and_errors()
     test_run_all_searches()
+    test_earliest_window()
+    test_in_window()
     print("\n" + "=" * 40)
     print("✓ All tests passed.")
     print()

@@ -37,9 +37,11 @@ console = Console()
 SOURCE_META = {
     "google_vision": ("Tier 1 — Free",  "1,000/month free"),
     "google_lens":   ("Tier 1 — Free",  "SerpAPI free tier"),
-    "twitter":       ("Tier 2 — Paid",  "pay per tweet read"),
+    "twitter":       ("Tier 1 — Apify", "~$0.40 per 1,000 tweets"),
     "instagram":     ("Tier 1 — Apify", "$5 free credit/month"),
     "facebook":      ("Tier 1 — Apify", "$5 free credit/month"),
+    "tiktok":        ("Tier 1 — Apify", "~$0.30 per 1,000 results"),
+    "reddit":        ("Tier 1 — Apify", "~$1.19 per 1,000 results"),
 }
 
 
@@ -163,7 +165,8 @@ def print_demo_report(record: dict, case_id: str, image_path: str,
 
 
 def run(image_path: str, case_id: str, cases_base: str = "cases",
-        demo: bool = False, keywords: list[str] = None) -> dict:
+        demo: bool = False, keywords: list[str] = None,
+        since: str = None, until: str = None) -> dict:
 
     # "+trump" marks a keyword as required: pages must contain it to pass on text alone
     keywords = keywords or []
@@ -194,7 +197,8 @@ def run(image_path: str, case_id: str, cases_base: str = "cases",
 
         t = progress.add_task("Step 2 — Reverse image search...", total=None)
         hits = run_all_searches(image_path, sha256,
-                                " ".join(keywords) or "misinformation")
+                                " ".join(keywords) or "misinformation",
+                                since, until)
         progress.remove_task(t)
 
         source_counts: dict[str, int] = {}
@@ -252,6 +256,11 @@ def main():
     parser.add_argument("--keywords",  nargs="+", default=[],
                         help="Relevance keywords; prefix one with + to require it "
                              "e.g. --keywords +trump jesus AI")
+    parser.add_argument("--since", default=None, metavar="YYYY-MM-DD",
+                        help="Search X/Twitter and Reddit posts from this date; "
+                             "without --until, only the 14 days after it")
+    parser.add_argument("--until", default=None, metavar="YYYY-MM-DD",
+                        help="Search X/Twitter and Reddit posts before this date")
     args = parser.parse_args()
 
     if not Path(args.image).exists():
@@ -259,7 +268,8 @@ def main():
         sys.exit(1)
 
     run(args.image, args.case_id, args.cases_dir,
-        demo=args.demo, keywords=args.keywords)
+        demo=args.demo, keywords=args.keywords,
+        since=args.since, until=args.until)
 
 
 if __name__ == "__main__":

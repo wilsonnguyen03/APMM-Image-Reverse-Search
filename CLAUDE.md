@@ -31,8 +31,8 @@ docker-compose run apmm_retrieval --image /app/cases/test.jpg --case-id test_001
 
 1. `utils.compute_sha256` gives the root ID, `sha256:<hash>`.
    - `.avif`, `.heic`, `.tiff` and `.webp` inputs are first converted to a `*_converted.jpg` next to the original, and that path is used from then on.
-2. `retrieval.run_all_searches` runs the sources in order: Google Vision, Google Lens (SerpAPI, with the image hosted on imgbb), Twitter, Apify Instagram, Apify Facebook. It de-duplicates by URL and caps the total at `MAX_TOTAL_HITS`.
-   - The social searches take a text query (default `"misinformation"`), not the image, so they are not true reverse image search.
+2. `retrieval.run_all_searches` runs Google Vision, Google Lens (SerpAPI, with the image hosted on imgbb), then five Apify social sources: Twitter/X (`apidojo/tweet-scraper`), Instagram, Facebook, TikTok and Reddit. It de-duplicates by normalised URL (`_url_key`; Google wins a duplicate) and caps the total at `MAX_TOTAL_HITS` (100). Each social platform keeps `SOCIAL_QUOTA` slots, Google fills the rest, and extra social results only fill slots Google leaves unused.
+   - The social searches take a text query (default `"misinformation"`), not the image, so they are not true reverse image search. `--since` / `--until` (YYYY-MM-DD) apply to Twitter and Reddit only; `--since` alone searches just the `EARLIEST_WINDOW_DAYS` (14) after it, to surface the earliest posts.
 3. `crawler.crawl_all_sync` is an async Playwright crawl. It writes `snapshots/item_NNN/{page.html,screenshot.png}` under the case dir and extracts dates.
 4. `cascade.build_cascade` builds the record.
    - The root item is the input image.
